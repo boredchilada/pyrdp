@@ -72,6 +72,8 @@ class DeviceRedirectionMITM(Subject):
 
         self.currentIORequests: Dict[(int, int), DeviceIORequestPDU] = {}
         self.forgedRequests: Dict[(int, int), DeviceRedirectionMITM.ForgedRequest] = {}
+        self.openFilePaths: Dict[(int, int), str] = {}
+        """Maps (deviceID, fileID) to file path for tracking writes/deletes/renames"""
 
         if self.config.extractFiles:
             self.responseHandlers: Dict[MajorFunction, callable] = {
@@ -81,6 +83,12 @@ class DeviceRedirectionMITM(Subject):
             }
         else:
             self.responseHandlers = {}
+
+        # Request-side handlers for operations where the data is in the request (writes, set_info)
+        self.requestHandlers: Dict[MajorFunction, callable] = {
+            MajorFunction.IRP_MJ_WRITE: self.handleWriteRequest,
+            MajorFunction.IRP_MJ_SET_INFORMATION: self.handleSetInformationRequest,
+        }
 
         self.client.createObserver(
             onPDUReceived=self.onClientPDUReceived,
@@ -148,13 +156,17 @@ class DeviceRedirectionMITM(Subject):
 
     def handleIORequest(self, pdu: DeviceIORequestPDU):
         """
-        Keep track of IO requests that are active.
+        Keep track of IO requests that are active and handle request-side interception.
         :param pdu: the device IO request
         """
 
         self.statCounter.increment(STAT.DEVICE_REDIRECTION_IOREQUEST)
         key = (pdu.deviceID, pdu.completionID)
         self.currentIORequests[key] = pdu
+
+        # Request-side handlers (for writes, set_information where data is in the request)
+        if pdu.majorFunction in self.requestHandlers:
+            self.requestHandlers[pdu.majorFunction](pdu)
 
     def handleIOResponse(self, pdu: DeviceIOResponsePDU):
         """
@@ -226,6 +238,10 @@ class DeviceRedirectionMITM(Subject):
         isDirectory = request.createOptions & CreateOption.FILE_NON_DIRECTORY_FILE == 0
         fileExists = (response.ioStatus != NTSTATUS.STATUS_NO_SUCH_FILE)
 
+        # Track file path by (deviceID, fileID) for write/delete/rename logging
+        if hasattr(request, 'path') and fileExists:
+            self.openFilePaths[(response.deviceID, response.fileID)] = request.path
+
         if fileExists and isFileRead and not isDirectory:
             mapping = FileMapping.generate(request.path, self.config.fileDir, self.deviceRoot(response.deviceID), self.log)
             key = (response.deviceID, response.fileID)
@@ -258,6 +274,76 @@ class DeviceRedirectionMITM(Subject):
         if key in self.mappings:
             mapping = self.mappings.pop(key)
             mapping.finalize()
+
+        self.openFilePaths.pop(key, None)
+
+    def handleWriteRequest(self, pdu: DeviceIORequestPDU):
+        """
+        Log file write operations (uploads / modifications).
+        The write data is in the request payload, not the response.
+        """
+        filePath = self.openFilePaths.get((pdu.deviceID, pdu.fileID), "unknown")
+        writeLength = len(pdu.payload) if pdu.payload else 0
+
+        self.log.info("File write: %(path)s (%(length)d bytes)", {
+            "path": filePath,
+            "length": writeLength,
+        })
+        self.log.info("file_write", {
+            "event_type": "file_write",
+            "src_ip": self.state.clientIp or "",
+            "src_port": self.state.clientPort or 0,
+            "file_path": filePath,
+            "write_length": writeLength,
+            "device_id": pdu.deviceID,
+            "file_id": pdu.fileID,
+        })
+
+    def handleSetInformationRequest(self, pdu: DeviceIORequestPDU):
+        """
+        Log file rename/delete operations from IRP_MJ_SET_INFORMATION.
+        The FileInformationClass in the payload determines the operation type.
+        """
+        filePath = self.openFilePaths.get((pdu.deviceID, pdu.fileID), "unknown")
+        payload = pdu.payload if pdu.payload else b""
+
+        # FileInformationClass is at the start of the payload (4 bytes LE)
+        if len(payload) >= 4:
+            infoClass = int.from_bytes(payload[0:4], 'little')
+
+            # FileDispositionInformation = 13 (0x0D) — delete
+            if infoClass == 13:
+                self.log.info("File delete: %(path)s", {"path": filePath})
+                self.log.info("file_delete", {
+                    "event_type": "file_delete",
+                    "src_ip": self.state.clientIp or "",
+                    "src_port": self.state.clientPort or 0,
+                    "file_path": filePath,
+                    "device_id": pdu.deviceID,
+                })
+            # FileRenameInformation = 10 (0x0A) — rename
+            elif infoClass == 10:
+                # Try to extract new filename from payload
+                newName = ""
+                if len(payload) > 12:
+                    try:
+                        nameLen = int.from_bytes(payload[8:12], 'little')
+                        newName = payload[12:12+nameLen].decode('utf-16le', errors='replace').strip('\x00')
+                    except Exception:
+                        pass
+                self.log.info("File rename: %(path)s -> %(newName)s", {"path": filePath, "newName": newName})
+                self.log.info("file_rename", {
+                    "event_type": "file_rename",
+                    "src_ip": self.state.clientIp or "",
+                    "src_port": self.state.clientPort or 0,
+                    "file_path": filePath,
+                    "new_name": newName,
+                    "device_id": pdu.deviceID,
+                })
+            else:
+                self.log.debug("SetInformation class %(infoClass)d on %(path)s", {
+                    "infoClass": infoClass, "path": filePath
+                })
 
     def handleClientLogin(self):
         """

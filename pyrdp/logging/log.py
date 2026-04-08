@@ -6,6 +6,7 @@
 
 import logging
 import logging.config
+import logging.handlers
 from configparser import ConfigParser
 
 from pathlib import Path
@@ -122,6 +123,22 @@ def configure(config: ConfigParser) -> bool:
         logDir.mkdir(exist_ok = True)
 
         logging.config.dictConfig(cfg['logs'])
+
+        # Upgrade the connections handler to RotatingFileHandler (10MB, 5 backups)
+        # for fleet-standard log rotation. Done in code because INI dictConfig
+        # passes all values as strings and RotatingFileHandler needs int params.
+        connLogger = logging.getLogger(LOGGER_NAMES.MITM_CONNECTIONS)
+        for h in connLogger.handlers:
+            if isinstance(h, logging.FileHandler) and not isinstance(h, logging.handlers.RotatingFileHandler):
+                if h.baseFilename.endswith('mitm.json'):
+                    rotHandler = logging.handlers.RotatingFileHandler(
+                        h.baseFilename, maxBytes=10_485_760, backupCount=5, encoding='utf-8')
+                    rotHandler.setFormatter(h.formatter)
+                    rotHandler.setLevel(h.level)
+                    connLogger.removeHandler(h)
+                    h.close()
+                    connLogger.addHandler(rotHandler)
+                    break
 
         # Enable the user configured filter.
         if 'filter' in logs:

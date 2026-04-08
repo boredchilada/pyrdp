@@ -33,19 +33,31 @@ def main():
     # Create a listening socket to accept connections.
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setblocking(0)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     if config.transparent:
         try:
             if not s.getsockopt(socket.SOL_IP, socket.IP_TRANSPARENT):
                 s.setsockopt(socket.SOL_IP, socket.IP_TRANSPARENT, 1)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         except Exception:
             logger.warning('Unable to set transparent socket. Are you running as root?')
 
     s.bind((config.listenAddress, config.listenPort))
     s.listen()  # Non-blocking.
-    reactor.adoptStreamPort(s.fileno(), socket.AF_INET, MITMServerFactory(config))
+    factory = MITMServerFactory(config)
+    listeningPort = reactor.adoptStreamPort(s.fileno(), socket.AF_INET, factory)
     s.close()  # reactor creates a copy of the fd.
+
+    def onShutdown():
+        logger.info("MITM server shutting down gracefully...")
+        listeningPort.stopListening()
+        # Cancel pending asyncio tasks (e.g. CredSSP coroutines)
+        loop = asyncio.get_event_loop()
+        for task in asyncio.all_tasks(loop):
+            if not task.done():
+                task.cancel()
+
+    reactor.addSystemEventTrigger('before', 'shutdown', onShutdown)
 
     message = "MITM Server listening on %(address)s:%(port)d"
     params = {"address": config.listenAddress, "port": config.listenPort}

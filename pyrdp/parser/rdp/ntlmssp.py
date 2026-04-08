@@ -86,13 +86,20 @@ class NTLMSSPParser(Parser):
         ntChallengeResponse = self.parseField(data, ntChallengeResponseFields)
         domain = self.parseField(data, domainNameFields).decode("utf-16le")
         user = self.parseField(data, userNameFields).decode("utf-16le")
-        workstation = self.parseField(data, workstationFields)
+        workstationRaw = self.parseField(data, workstationFields)
+        workstation = workstationRaw.decode("utf-16le") if workstationRaw else ""
         encryptedRandomSessionKey = self.parseField(data, encryptedRandomSessionKeyFields)
+
+        # Extract negotiate flags, version, and MIC (parsed but previously discarded)
+        negotiateFlags = int.from_bytes(negotiationFlags, 'little') if negotiationFlags else 0
+        versionBytes = version if version else b""
+        micBytes = mic if mic else b""
 
         proof = ntChallengeResponse[: 16]
         response = ntChallengeResponse[16 :]
 
-        return NTLMSSPAuthenticatePDU(user, domain, proof, response)
+        return NTLMSSPAuthenticatePDU(user, domain, proof, response, workstation,
+                                       negotiateFlags, versionBytes, micBytes)
 
     def parseNTLMSSPTSRequest(self, data: bytes, stream: BytesIO) -> NTLMSSPTSRequestPDU:
         if not ber.readUniversalTag(stream, ber.Tag.BER_TAG_SEQUENCE, True):

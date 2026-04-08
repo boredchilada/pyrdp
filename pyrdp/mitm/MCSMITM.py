@@ -9,6 +9,7 @@ from typing import Callable, Dict
 
 from pyrdp.enum import ClientCapabilityFlag, EncryptionLevel, EncryptionMethod, HighColorDepth, MCSChannelName, \
     NegotiationProtocols, PlayerPDUType, SupportedColorDepth
+from pyrdp.mitm.fingerprint import resolveWindowsBuild, resolveKeyboardLayout
 from pyrdp.layer import MCSLayer
 from pyrdp.logging.StatCounter import StatCounter, STAT
 from pyrdp.mcs import MCSClientChannel, MCSServerChannel
@@ -119,7 +120,12 @@ class MCSMITM:
         if rdpClientDataPDU.networkData:
             self.state.channelDefinitions = rdpClientDataPDU.networkData.channelDefinitions
             if "MS_T120" in map(lambda channelDef: channelDef.name, rdpClientDataPDU.networkData.channelDefinitions):
-                self.log.info("Bluekeep (CVE-2019-0708) scan or exploit attempt detected.", {"bluekeep": True})
+                self.log.info("Bluekeep (CVE-2019-0708) scan or exploit attempt detected.", {
+                    "event_type": "exploit_attempt",
+                    "src_ip": self.state.clientIp or "",
+                    "src_port": self.state.clientPort or 0,
+                    "attack_patterns": {"bluekeep_cve_2019_0708": True},
+                })
 
         serverGCCPDU = GCCConferenceCreateRequestPDU("1", rdpClientConnectionParser.write(rdpClientDataPDU))
         serverMCSPDU = MCSConnectInitialPDU(
@@ -132,7 +138,57 @@ class MCSMITM:
             gccParser.write(serverGCCPDU)
         )
 
-        self.log.info("Client hostname %(clientName)s", {"clientName": rdpClientDataPDU.coreData.clientName.strip("\x00")})
+        coreData = rdpClientDataPDU.coreData
+        clientName = coreData.clientName.strip("\x00")
+        channels = [ch.name for ch in rdpClientDataPDU.networkData.channelDefinitions] if rdpClientDataPDU.networkData else []
+
+        osVersion = resolveWindowsBuild(coreData.clientBuild)
+        kbLocale = resolveKeyboardLayout(coreData.keyboardLayout)
+
+        self.log.info("Client hostname %(clientName)s", {"clientName": clientName})
+        self.log.info("Client fingerprint: os=%(os)s build=%(clientBuild)d keyboard=%(kbLocale)s "
+                       "resolution=%(w)dx%(h)d channels=%(channels)s", {
+            "os": osVersion,
+            "clientBuild": coreData.clientBuild,
+            "kbLocale": kbLocale,
+            "w": coreData.desktopWidth,
+            "h": coreData.desktopHeight,
+            "channels": ",".join(channels) if channels else "none",
+        })
+
+        # Store fingerprint in state for fleet event logging
+        self.state.rdpFingerprint = {
+            "client_name": clientName,
+            "client_build": coreData.clientBuild,
+            "os_version": osVersion,
+            "keyboard_layout": coreData.keyboardLayout,
+            "keyboard_locale": kbLocale,
+            "keyboard_type": str(coreData.keyboardType) if coreData.keyboardType else "",
+            "color_depth": str(coreData.highColorDepth) if coreData.highColorDepth else str(coreData.colorDepth),
+            "desktop_width": coreData.desktopWidth,
+            "desktop_height": coreData.desktopHeight,
+            "channels": channels,
+            "connection_type": str(coreData.connectionType) if coreData.connectionType else "",
+            "nla_used": self.state.serverRequiresNLA,
+            "rdp_version": str(coreData.version),
+            "server_selected_protocol": str(coreData.serverSelectedProtocol) if coreData.serverSelectedProtocol else "",
+        }
+        # Optional fields — only include if present
+        if coreData.clientDigProductId:
+            self.state.rdpFingerprint["client_dig_product_id"] = coreData.clientDigProductId.strip("\x00")
+        if coreData.serialNumber:
+            self.state.rdpFingerprint["serial_number"] = coreData.serialNumber
+        if coreData.desktopPhysicalWidth:
+            self.state.rdpFingerprint["desktop_physical_width"] = coreData.desktopPhysicalWidth
+            self.state.rdpFingerprint["desktop_physical_height"] = coreData.desktopPhysicalHeight
+        if coreData.desktopScaleFactor:
+            self.state.rdpFingerprint["desktop_scale_factor"] = coreData.desktopScaleFactor
+        if coreData.deviceScaleFactor:
+            self.state.rdpFingerprint["device_scale_factor"] = coreData.deviceScaleFactor
+        if coreData.earlyCapabilityFlags:
+            self.state.rdpFingerprint["early_capability_flags"] = int(coreData.earlyCapabilityFlags)
+        if coreData.desktopOrientation:
+            self.state.rdpFingerprint["desktop_orientation"] = str(coreData.desktopOrientation)
 
         self.server.sendPDU(serverMCSPDU)
 

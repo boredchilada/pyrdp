@@ -119,6 +119,9 @@ class RDPMITM:
 
         self.crawler: FileCrawlerMITM = None
 
+        self._credSSPDeferred = None
+        """Tracks the CredSSP async coroutine deferred for cancellation on disconnect"""
+
         self.client.x224.addObserver(X224Logger(self.getClientLog("x224")))
         self.client.mcs.addObserver(MCSLogger(self.getClientLog("mcs")))
         self.client.slowPath.addObserver(SlowPathLogger(self.getClientLog("slowpath")))
@@ -223,6 +226,24 @@ class RDPMITM:
             # Wait for server certificate
             reactor.callLater(1, self.doClientTls)
 
+        # Log server certificate details for intelligence collection
+        try:
+            self.state.serverCertInfo = {
+                "subject": cert.get_subject().CN or "",
+                "issuer": cert.get_issuer().CN or "",
+                "serial": str(cert.get_serial_number()),
+                "not_before": cert.get_notBefore().decode() if cert.get_notBefore() else "",
+                "not_after": cert.get_notAfter().decode() if cert.get_notAfter() else "",
+                "sha256": cert.digest("sha256").decode(),
+            }
+            self.log.info("Server certificate: CN=%(cn)s issuer=%(issuer)s sha256=%(sha256)s", {
+                "cn": self.state.serverCertInfo["subject"],
+                "issuer": self.state.serverCertInfo["issuer"],
+                "sha256": self.state.serverCertInfo["sha256"],
+            })
+        except Exception:
+            pass  # Don't let cert logging break the connection
+
         # Clone certificate if necessary.
         if self.certs:
             privKey, certFile = self.certs.lookup(cert)
@@ -243,7 +264,7 @@ class RDPMITM:
             # Server requires NLA and we have credentials — perform CredSSP ourselves
             self.log.info("Performing CredSSP authentication to server with replacement credentials.")
             from pyrdp.core import defer
-            defer(self._performServerCredSSP())
+            self._credSSPDeferred = defer(self._performServerCredSSP())
             return
 
         if self.state.ntlmCapture:
@@ -251,12 +272,13 @@ class RDPMITM:
             self.client.segmentation.addObserver(NLAHandler(
                 self.client.tcp, ntlmSSPState, self.getLog("ntlmssp"),
                 ntlmCapture=True, challenge=self.state.config.sspChallenge,
-                disconnectCallback=lambda: self.client.tcp.disconnect()
+                disconnectCallback=lambda: self.client.tcp.disconnect(),
+                mitmState=self.state
             ))
             return
 
-        self.client.segmentation.addObserver(NLAHandler(self.server.tcp, ntlmSSPState, self.getLog("ntlmssp")))
-        self.server.segmentation.addObserver(NLAHandler(self.client.tcp, ntlmSSPState, self.getLog("ntlmssp")))
+        self.client.segmentation.addObserver(NLAHandler(self.server.tcp, ntlmSSPState, self.getLog("ntlmssp"), mitmState=self.state))
+        self.server.segmentation.addObserver(NLAHandler(self.client.tcp, ntlmSSPState, self.getLog("ntlmssp"), mitmState=self.state))
 
     async def _performServerCredSSP(self):
         """
