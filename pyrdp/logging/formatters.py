@@ -9,9 +9,11 @@ Contains custom logging handlers for the library.
 """
 
 import binascii
+import hashlib
 import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 
 
 class VariableFormatter(logging.Formatter):
@@ -33,10 +35,20 @@ class VariableFormatter(logging.Formatter):
 
 class JSONFormatter(logging.Formatter):
     """
-    Formatter that returns a single JSON line of the provided data.
-    Example usage: logger.info("MITM Server listening on port %(port)d", {"port": listenPort})
-    Will output: {"message": "MITM Server listening on port %(port)d", "loggerName": "mitm", "timestamp": "2018-12-03T10:51:S.f-0500", "level": "INFO", "port": 3388}
+    Fleet-standard NDJSON formatter for the connections log (mitm.json).
+
+    When a log record's args dict contains an "event_type" key, emits a
+    fleet-compliant JSON line with all 11 mandatory fields from LOGGING_STANDARD.md.
+    Records without "event_type" fall back to the legacy PyRDP JSON format for
+    backwards compatibility.
+
+    Fleet mandatory fields: @timestamp, event_type, src_ip, src_port, dest_ip,
+    dest_port, proto, type, app, session, payload
     """
+
+    # Fields that map to fleet mandatory keys and should not be duplicated
+    _FLEET_MANDATORY = {"event_type", "src_ip", "src_port", "dest_ip", "dest_port",
+                        "proto", "type", "app", "session", "payload"}
 
     def __init__(self, baseDict: dict = None):
         """
@@ -46,29 +58,70 @@ class JSONFormatter(logging.Formatter):
         self.baseDict = baseDict if baseDict is not None else {}
 
     def format(self, record: logging.LogRecord) -> str:
+        if isinstance(record.args, dict) and "event_type" in record.args:
+            return self._formatFleetEvent(record)
+        return self._formatLegacy(record)
+
+    def _formatFleetEvent(self, record: logging.LogRecord) -> str:
+        """Format as fleet-standard NDJSON with all 11 mandatory fields."""
+        args = record.args
+
+        # Fleet session ID: MD5(IP:date) — correlates same attacker across reconnects
+        srcIp = args.get("src_ip", "") or getattr(record, "clientIp", "")
+        today = datetime.now(timezone.utc).date()
+        fleetSession = hashlib.md5(f"{srcIp}:{today}".encode()).hexdigest()[:16]
+
+        data = {
+            "@timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
+            "event_type": args["event_type"],
+            "src_ip": srcIp,
+            "src_port": args.get("src_port", 0),
+            "dest_ip": os.environ.get("DEST_IP", self.baseDict.get("dest_ip", "")),
+            "dest_port": os.environ.get("DEST_PORT", self.baseDict.get("dest_port", "3389")),
+            "proto": "TCP",
+            "type": "pyrdp_rdp",
+            "app": "pyrdp",
+            "session": fleetSession,
+            "session_id": getattr(record, "sessionID", ""),
+            "payload": args.get("payload", ""),
+        }
+
+        # Add sensor ID from base config
+        if "sensor" in self.baseDict:
+            data["sensor"] = self.baseDict["sensor"]
+
+        # Merge extra fields (rdp fingerprint, credentials, stats, etc.)
+        for k, v in args.items():
+            if k not in self._FLEET_MANDATORY:
+                data[k] = v
+
+        # Include clientIp if available and not already set as src_ip
+        if hasattr(record, "clientIp") and not data.get("src_ip"):
+            data["src_ip"] = record.clientIp
+
+        return json.dumps(data, ensure_ascii=False, default=lambda item: str(item))
+
+    def _formatLegacy(self, record: logging.LogRecord) -> str:
+        """Legacy PyRDP JSON format for non-fleet log entries."""
         data = self.baseDict.copy()
 
         data.update({
             "message": record.msg,
             "loggerName": record.name,
-            "timestamp": datetime.strftime(datetime.utcfromtimestamp(record.created), "%Y-%m-%dT%H:%M:%S.%f"),
+            "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
             "level": record.levelname,
         })
 
         if hasattr(record, "sessionID"):
-            data.update({
-                "sessionID": record.sessionID
-            })
+            data["sessionID"] = record.sessionID
 
         if hasattr(record, "clientIp"):
-            data.update({
-                "clientIp": record.clientIp
-            })
+            data["clientIp"] = record.clientIp
 
         if isinstance(record.args, dict):
             data.update(record.args)
 
-        return json.dumps(data, ensure_ascii=False, default=lambda item: item.__repr__())
+        return json.dumps(data, ensure_ascii=False, default=lambda item: str(item))
 
 
 class SSLSecretFormatter(logging.Formatter):

@@ -88,9 +88,17 @@ class TCPMITM:
             port = self.client.transport.client[1]
 
         self.state.clientIp = ip
+        self.state.clientPort = port
         self.log.extra['clientIp'] = ip
         self.log.info("New client connected from %(clientIp)s:%(clientPort)i",
                       {"clientIp": ip, "clientPort": port})
+
+        # Fleet event: connection_open
+        self.log.info("connection_open", {
+            "event_type": "connection_open",
+            "src_ip": ip,
+            "src_port": port,
+        })
 
     def onClientDisconnection(self, reason):
         """
@@ -106,6 +114,29 @@ class TCPMITM:
                                                   self.recorder.recordFilename})
         else:
             self.statCounter.logReport(self.log)
+
+        # Fleet event: connection_close with full session summary
+        closeEvent = {
+            "event_type": "connection_close",
+            "src_ip": self.state.clientIp or "",
+            "src_port": self.state.clientPort or 0,
+        }
+        if self.state.rdpFingerprint:
+            closeEvent["rdp"] = self.state.rdpFingerprint
+        if self.state.clientInfo:
+            closeEvent["client_info"] = self.state.clientInfo
+        if self.state.ntlmInfo:
+            closeEvent["ntlm"] = self.state.ntlmInfo
+        if self.state.capturedUsername:
+            closeEvent["username"] = self.state.capturedUsername
+            closeEvent["password"] = self.state.capturedPassword
+            closeEvent["password_length"] = len(self.state.capturedPassword) if self.state.capturedPassword else 0
+        if self.state.serverCertInfo:
+            closeEvent["server_cert"] = self.state.serverCertInfo
+        closeEvent["stats"] = self.statCounter.stats
+        if self.recorder.recordFilename:
+            closeEvent["replay_file"] = self.recorder.recordFilename
+        self.log.info("connection_close", closeEvent)
 
         self.recorder.finalize()
         self.server.disconnect(True)

@@ -13,6 +13,7 @@ from pyrdp.enum import NTLMSSPMessageType
 from pyrdp.layer import SegmentationObserver, IntermediateLayer
 from pyrdp.logging import LOGGER_NAMES
 from pyrdp.logging.formatters import NTLMSSPHashFormatter
+from pyrdp.mitm.fingerprint import resolveNTLMVersion
 from pyrdp.parser import NTLMSSPParser
 from pyrdp.pdu import NTLMSSPPDU, NTLMSSPChallengePDU, NTLMSSPAuthenticatePDU
 from pyrdp.security import NTLMSSPState
@@ -27,12 +28,14 @@ class NLAHandler(SegmentationObserver):
 
     def __init__(self, sink: IntermediateLayer, state: NTLMSSPState, log: logging.LoggerAdapter,
                  ntlmCapture: bool = False, challenge: str = None,
-                 disconnectCallback: Optional[Callable[[], None]] = None):
+                 disconnectCallback: Optional[Callable[[], None]] = None,
+                 mitmState=None):
         """
         Create a new NLA Handler.
         sink: layer to forward packets to.
         state: NTLMSSPState that is shared between both the client-facing handler and the server-facing handler.
         disconnectCallback: called after hash capture to trigger clean connection teardown.
+        mitmState: RDPMITMState for storing NTLM intelligence in fleet events.
         """
 
         super().__init__()
@@ -43,6 +46,7 @@ class NLAHandler(SegmentationObserver):
         self.challenge = challenge
         self.log = log
         self.disconnectCallback = disconnectCallback
+        self.mitmState = mitmState
 
     def getChallenge(self):
         """
@@ -87,6 +91,22 @@ class NLAHandler(SegmentationObserver):
                 self.log.info("[!] NTLMSSP Hash: %(ntlmSSPHash)s", {
                     "ntlmSSPHash": (ntlmSSPHash)
                 })
+
+                # Store NTLM intelligence in MITM state for fleet events
+                if self.mitmState is not None:
+                    ntlmVersion = resolveNTLMVersion(message.version) if message.version else ""
+                    self.mitmState.ntlmInfo = {
+                        "user": user,
+                        "domain": domain,
+                        "workstation": message.workstation,
+                        "hash": ntlmSSPHash,
+                        "negotiate_flags": message.negotiateFlags,
+                    }
+                    if ntlmVersion:
+                        self.mitmState.ntlmInfo["ntlm_os_version"] = ntlmVersion
+                    self.log.info("NTLM workstation=%(ws)s version=%(ver)s", {
+                        "ws": message.workstation, "ver": ntlmVersion
+                    })
 
                 if self.ntlmCapture:
                     # Send a clean CredSSP error instead of letting the TLS tunnel die

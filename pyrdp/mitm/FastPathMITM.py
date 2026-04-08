@@ -39,12 +39,11 @@ class FastPathMITM(BasePathMITM):
         if self.state.forwardInput:
             self.server.sendPDU(pdu)
 
-        if not self.state.loggedIn:
-            for event in pdu.events:
-                if isinstance(event, FastPathScanCodeEvent):
-                    self.onScanCode(event.scanCode, event.isReleased, event.rawHeaderByte & scancode.KBDFLAGS_EXTENDED != 0)
-                elif isinstance(event, FastPathMouseEvent):
-                    self.onMouse(event.mouseX, event.mouseY, event.pointerFlags)
+        for event in pdu.events:
+            if isinstance(event, FastPathScanCodeEvent):
+                self.onScanCode(event.scanCode, event.isReleased, event.rawHeaderByte & scancode.KBDFLAGS_EXTENDED != 0)
+            elif isinstance(event, FastPathMouseEvent):
+                self.onMouse(event.mouseX, event.mouseY, event.pointerFlags)
 
     def onServerPDUReceived(self, pdu: FastPathPDU):
         self.statCounter.increment(STAT.IO_OUTPUT_FASTPATH)

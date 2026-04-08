@@ -5,12 +5,20 @@
 #
 from logging import LoggerAdapter
 
+from twisted.internet import reactor
+
 from pyrdp.mitm.state import RDPMITMState
 from pyrdp.enum import PointerFlag, ScanCode
 from pyrdp.enum.scancode import getKeyName
 from pyrdp.pdu.pdu import PDU
 from pyrdp.layer.layer import Layer
 from pyrdp.logging.StatCounter import StatCounter, STAT
+
+# Flush post-login keystroke buffer after this many seconds of inactivity
+KEYSTROKE_FLUSH_TIMEOUT = 2.0
+# Flush if buffer exceeds this many characters
+KEYSTROKE_FLUSH_MAX_LEN = 500
+
 
 class BasePathMITM:
     """
@@ -23,6 +31,8 @@ class BasePathMITM:
         self.server = server
         self.statCounter = statCounter
         self.log = log
+        self._postLoginBuffer = ""
+        self._flushDelayed = None
 
     def onClientPDUReceived(self, pdu: PDU):
         raise NotImplementedError("onClientPDUReceived must be overridden")
@@ -49,37 +59,82 @@ class BasePathMITM:
             if 0.5 < percentageX < 0.65 and 0.5 < percentageY < 0.65:
                 self.loginAttempt()
 
+    def _flushPostLoginBuffer(self, trigger: str = "idle"):
+        """Flush accumulated post-login keystrokes as a single fleet event."""
+        if not self._postLoginBuffer:
+            return
+        self.log.info("keystroke_capture", {
+            "event_type": "keystroke_capture",
+            "src_ip": self.state.clientIp or "",
+            "src_port": self.state.clientPort or 0,
+            "input": self._postLoginBuffer,
+            "trigger": trigger,
+            "phase": "post_login",
+        })
+        self._postLoginBuffer = ""
+        self._flushDelayed = None
+
+    def _scheduleFlush(self):
+        """Schedule a flush after idle timeout, resetting any existing timer."""
+        if self._flushDelayed and self._flushDelayed.active():
+            self._flushDelayed.cancel()
+        self._flushDelayed = reactor.callLater(KEYSTROKE_FLUSH_TIMEOUT, self._flushPostLoginBuffer, "idle")
+
+    def _appendPostLogin(self, text: str):
+        """Append text to post-login buffer and schedule/trigger flush."""
+        self._postLoginBuffer += text
+        if len(self._postLoginBuffer) >= KEYSTROKE_FLUSH_MAX_LEN:
+            self._flushPostLoginBuffer("buffer_full")
+        else:
+            self._scheduleFlush()
+
     def onScanCode(self, scanCode: int, isReleased: bool, isExtended: bool):
         """
-        Handle scan code.
+        Handle scan code for both pre-login (credential heuristic) and post-login (keystroke capture).
         """
         keyName = getKeyName(scanCode, isExtended, self.state.shiftPressed, self.state.capsLockOn)
         scanCodeTuple = (scanCode, isExtended)
 
-        # Left or right shift
+        # Modifier key tracking (always active)
         if scanCodeTuple in [ScanCode.LSHIFT, ScanCode.RSHIFT]:
             self.state.shiftPressed = not isReleased
-        # Caps lock
+            return
         elif scanCodeTuple == ScanCode.CAPSLOCK and not isReleased:
             self.state.capsLockOn = not self.state.capsLockOn
-        # Control
+            return
         elif scanCodeTuple in [ScanCode.LCONTROL, ScanCode.RCONTROL]:
             self.state.ctrlPressed = not isReleased
-        # Backspace
-        elif scanCodeTuple == ScanCode.BACKSPACE and not isReleased:
-            self.state.inputBuffer += "<\\b>"
-        # Tab
-        elif scanCodeTuple == ScanCode.TAB and not isReleased:
-            self.state.inputBuffer += "<\\t>"
-        # CTRL + A
-        elif scanCodeTuple == ScanCode.KEY_A and self.state.ctrlPressed and not isReleased:
-            self.state.inputBuffer += "<ctrl-a>"
-        elif scanCodeTuple == ScanCode.SPACE and not isReleased:
-            self.state.inputBuffer += " "
-        # Return
-        elif scanCodeTuple == ScanCode.RETURN and not isReleased:
-            self.loginAttempt()
-        # Normal input
-        elif len(keyName) == 1:
-            if not isReleased:
+            return
+
+        if isReleased:
+            return
+
+        # Pre-login: credential heuristic (original behavior)
+        if not self.state.loggedIn:
+            if scanCodeTuple == ScanCode.BACKSPACE:
+                self.state.inputBuffer += "<\\b>"
+            elif scanCodeTuple == ScanCode.TAB:
+                self.state.inputBuffer += "<\\t>"
+            elif scanCodeTuple == ScanCode.KEY_A and self.state.ctrlPressed:
+                self.state.inputBuffer += "<ctrl-a>"
+            elif scanCodeTuple == ScanCode.SPACE:
+                self.state.inputBuffer += " "
+            elif scanCodeTuple == ScanCode.RETURN:
+                self.loginAttempt()
+            elif len(keyName) == 1:
                 self.state.inputBuffer += keyName
+        else:
+            # Post-login: buffered keystroke capture for fleet events
+            if scanCodeTuple == ScanCode.RETURN:
+                self._appendPostLogin("\n")
+                self._flushPostLoginBuffer("enter")
+            elif scanCodeTuple == ScanCode.BACKSPACE:
+                self._appendPostLogin("<\\b>")
+            elif scanCodeTuple == ScanCode.TAB:
+                self._appendPostLogin("<\\t>")
+            elif scanCodeTuple == ScanCode.KEY_A and self.state.ctrlPressed:
+                self._appendPostLogin("<ctrl-a>")
+            elif scanCodeTuple == ScanCode.SPACE:
+                self._appendPostLogin(" ")
+            elif len(keyName) == 1:
+                self._appendPostLogin(keyName)

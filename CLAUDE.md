@@ -24,6 +24,12 @@ pip install -U -e ".[full]"
 # Unit tests
 python -m unittest discover -v
 
+# CredSSP/NLA-specific tests (run from venv)
+./venv/Scripts/python -m pytest test/test_proxy_protocol.py test/test_credssp_client.py test/test_nla_improvements.py -v
+
+# Live NLA MITM test (requires NLA-enforcing server)
+./venv/Scripts/python -m pyrdp.bin.mitm <target>:3389 -l 33389 -u <user> -p <pass> -L DEBUG
+
 # Integration tests (require test files extracted first)
 # Extract: unzip test/files/test_files.zip -d test/files && unzip test/files/test_convert_428.zip -d test/files
 python test/test_prerecorded.py
@@ -108,3 +114,22 @@ Built on **Twisted** for async I/O. The `twisted/` directory at repo root contai
 - f-strings or `str.format()` for string formatting
 - **%-style formatting for log statements only** (for analysis purposes): `logging.info("Hello %(who)s!", {"who": "World"})`
 - Docstrings in reStructuredText syntax
+
+## NLA/CredSSP Architecture
+
+When the server enforces NLA (`HYBRID_REQUIRED_BY_SERVER`), PyRDP performs CredSSP on behalf of the client:
+
+1. X224MITM detects `HYBRID_REQUIRED`, sets `state.serverRequiresNLA`, reconnects with CredSSP
+2. Client is told `selectedProtocol=SSL` (no NLA needed from client's perspective)
+3. RDPMITM._performServerCredSSP() runs CredSSP as async coroutine using impacket's NTLM
+4. Client data is **gated** at the segmentation layer during CredSSP to prevent race conditions
+5. MCSMITM.onConnectInitial() patches `serverSelectedProtocol` from SSL→CREDSSP before forwarding
+6. After CredSSP + 0.5s delay, gated client data is replayed and normal MITM flow resumes
+
+Key files: `RDPMITM.py` (_performServerCredSSP), `X224MITM.py` (onConnectionConfirm), `MCSMITM.py` (onConnectInitial), `security/credssp.py`
+
+## Windows Operational Notes
+
+- **One MITM instance at a time when testing** — multiple instances can cause server-side CredSSP session conflicts from the same source IP
+- **Port reuse after kill**: `SO_REUSEADDR` is not set on Windows; forcefully killed processes leave sockets in TIME_WAIT. Wait a few seconds or use a different port
+- **Kill by PID, not by process name**: `taskkill /F /PID <pid>` — don't `taskkill /F /IM python.exe` as it kills unrelated Python processes

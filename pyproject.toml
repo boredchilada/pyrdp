@@ -8,7 +8,7 @@ name = "pyrdp-mitm"
 description = "Remote Desktop Protocol (RDP) Monster-in-the-Middle tool and Python library"
 readme = "README.md"
 version = "2.1.1.dev0"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 authors = [
     { name = "Olivier Bilodeau", email = "obilodeau@gosecure.net" },
     { name = "Émilio Gonzalez" },
@@ -25,8 +25,6 @@ classifiers = [
     "Operating System :: POSIX",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -45,8 +43,6 @@ dependencies = [
     'pyasn1>=0,<1',
     'pycryptodome>=3.5,<4',
     'pyopenssl>=19,<24',
-    'pytz',
-    'rsa>=4,<5',
     'scapy>=2.4,<3',
     'service_identity>=18',
     'twisted>=23'

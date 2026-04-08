@@ -38,12 +38,18 @@ class NTLMSSPChallengePayloadPDU(PDU):
 
 
 class NTLMSSPAuthenticatePDU(NTLMSSPPDU):
-    def __init__(self, user: str, domain: str, proof: bytes, response: bytes):
+    def __init__(self, user: str, domain: str, proof: bytes, response: bytes,
+                 workstation: str = "", negotiateFlags: int = 0,
+                 version: bytes = b"", mic: bytes = b""):
         super().__init__(NTLMSSPMessageType.AUTHENTICATE_MESSAGE)
         self.user = user
         self.domain = domain
         self.proof = proof
         self.response = response
+        self.workstation = workstation
+        self.negotiateFlags = negotiateFlags
+        self.version = version
+        self.mic = mic
 
 
 class NTLMSSPTSRequestPDU(PDU):

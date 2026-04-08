@@ -78,6 +78,57 @@ class SecurityMITM:
             "clientAddress": clientAddress
         })
 
+        # Log extra client info for fingerprinting
+        if pdu.extraInfo:
+            clientDir = decodeUTF16LE(pdu.extraInfo.clientDir) if pdu.extraInfo.clientDir else ""
+            self.log.info("Client extra: dir=%(clientDir)r perfFlags=%(perfFlags)s shell=%(shell)r", {
+                "clientDir": clientDir,
+                "perfFlags": pdu.extraInfo.performanceFlags,
+                "shell": pdu.alternateShell,
+            })
+
+        # Store in state for fleet event logging
+        self.state.clientInfo = {
+            "domain": pdu.domain,
+            "username": pdu.username,
+            "client_address": clientAddress or "",
+            "alternate_shell": pdu.alternateShell or "",
+            "working_dir": pdu.workingDir or "",
+            "code_page": pdu.codePage,
+            "info_flags": pdu.flags,
+        }
+        if pdu.extraInfo:
+            if pdu.extraInfo.clientDir:
+                self.state.clientInfo["client_dir"] = decodeUTF16LE(pdu.extraInfo.clientDir)
+            if pdu.extraInfo.performanceFlags is not None:
+                self.state.clientInfo["performance_flags"] = pdu.extraInfo.performanceFlags
+            if pdu.extraInfo.clientSessionID is not None:
+                self.state.clientInfo["client_session_id"] = pdu.extraInfo.clientSessionID
+            if pdu.extraInfo.autoReconnectCookie is not None:
+                self.state.clientInfo["auto_reconnect"] = True
+            if pdu.extraInfo.dynamicDSTTimeZoneKeyName:
+                tzName = pdu.extraInfo.dynamicDSTTimeZoneKeyName
+                if isinstance(tzName, bytes):
+                    tzName = tzName.decode("utf-16le", errors="replace")
+                self.state.clientInfo["timezone_name"] = tzName.strip("\x00")
+            if pdu.extraInfo.dynamicDaylightTimeDisabled is not None:
+                self.state.clientInfo["dst_disabled"] = bool(pdu.extraInfo.dynamicDaylightTimeDisabled)
+
+        self.state.capturedUsername = pdu.username
+        self.state.capturedPassword = pdu.password
+
+        # Fleet event: login_success (credentials captured and forwarded)
+        self.log.info("login_success", {
+            "event_type": "login_success",
+            "src_ip": self.state.clientIp or "",
+            "src_port": self.state.clientPort or 0,
+            "username": pdu.username,
+            "password": pdu.password,
+            "password_length": len(pdu.password) if pdu.password else 0,
+            "rdp": self.state.rdpFingerprint,
+            "client_info": self.state.clientInfo,
+        })
+
         self.recorder.record(pdu, PlayerPDUType.CLIENT_INFO)
 
         # If set, replace the provided username and password to connect the user regardless of

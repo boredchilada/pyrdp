@@ -102,6 +102,27 @@ class RDPMITMState:
         self.pendingServerCredSSP: bool = False
         """True while waiting for client credentials before connecting to server"""
 
+        self.clientPort: int = 0
+        """The current client source port"""
+
+        self.rdpFingerprint: dict = {}
+        """RDP client fingerprint data (clientBuild, keyboard, channels, etc.)"""
+
+        self.clientInfo: dict = {}
+        """Client Info PDU data (domain, username, timezone, etc.)"""
+
+        self.ntlmInfo: dict = {}
+        """NTLM authentication data (domain, workstation, hash)"""
+
+        self.capturedUsername: str = ""
+        """Username captured from Client Info PDU"""
+
+        self.capturedPassword: str = ""
+        """Password captured from Client Info PDU"""
+
+        self.serverCertInfo: dict = {}
+        """Server TLS certificate details (subject, issuer, SHA256, etc.)"""
+
         self.securitySettings.addObserver(self.crypters[ParserMode.CLIENT])
         self.securitySettings.addObserver(self.crypters[ParserMode.SERVER])
 

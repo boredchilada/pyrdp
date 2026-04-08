@@ -42,14 +42,13 @@ class SlowPathMITM(BasePathMITM):
         if self.state.forwardInput:
             self.server.sendPDU(pdu)
 
-        if not self.state.loggedIn:
-            if isinstance(pdu, InputPDU):
-                for event in pdu.events:
-                    if isinstance(event, KeyboardEvent):
-                        self.onScanCode(event.keyCode, event.flags & KeyboardFlag.KBDFLAGS_DOWN == 0,
-                                        event.flags & KeyboardFlag.KBDFLAGS_EXTENDED != 0)
-                    elif isinstance(event, MouseEvent):
-                        self.onMouse(event.x, event.y, event.flags)
+        if isinstance(pdu, InputPDU):
+            for event in pdu.events:
+                if isinstance(event, KeyboardEvent):
+                    self.onScanCode(event.keyCode, event.flags & KeyboardFlag.KBDFLAGS_DOWN == 0,
+                                    event.flags & KeyboardFlag.KBDFLAGS_EXTENDED != 0)
+                elif isinstance(event, MouseEvent):
+                    self.onMouse(event.x, event.y, event.flags)
 
     def onServerPDUReceived(self, pdu: SlowPathPDU):
         self.statCounter.increment(STAT.IO_OUTPUT_SLOWPATH)
