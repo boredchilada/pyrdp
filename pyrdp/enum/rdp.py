@@ -255,6 +255,15 @@ class RDPVersion(IntEnum):
     RDP10_9 = 0x8000e
     RDP10_10 = 0x8000f
     RDP10_11 = 0x80010
+    RDP10_12 = 0x80011
+
+    @classmethod
+    def _missing_(cls, value):
+        """Handle unknown RDP version numbers gracefully instead of crashing."""
+        obj = int.__new__(cls, value)
+        obj._name_ = f"RDP_UNKNOWN_0x{value:X}"
+        obj._value_ = value
+        return obj
 
 
 class ColorDepth(IntEnum):
