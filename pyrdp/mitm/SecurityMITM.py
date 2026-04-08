@@ -76,6 +76,8 @@ class SecurityMITM:
         cleanPass = pdu.password.strip("\x00") if pdu.password else ""
         cleanDomain = pdu.domain.strip("\x00") if pdu.domain else ""
         cleanAddr = clientAddress.strip("\x00") if clientAddress else ""
+        cleanShell = pdu.alternateShell.strip("\x00") if pdu.alternateShell else ""
+        cleanWorkDir = pdu.workingDir.strip("\x00") if pdu.workingDir else ""
 
         self.log.info("Client Info: username=%(username)r password=%(password)r domain=%(domain)r clientAddress=%(clientAddress)r", {
             "username": cleanUser,
@@ -92,10 +94,6 @@ class SecurityMITM:
                 "perfFlags": pdu.extraInfo.performanceFlags,
                 "shell": cleanShell,
             })
-
-        # Store in state for fleet event logging (null bytes stripped)
-        cleanShell = pdu.alternateShell.strip("\x00") if pdu.alternateShell else ""
-        cleanWorkDir = pdu.workingDir.strip("\x00") if pdu.workingDir else ""
 
         self.state.clientInfo = {
             "domain": cleanDomain,
