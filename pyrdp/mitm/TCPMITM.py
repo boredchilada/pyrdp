@@ -76,12 +76,17 @@ class TCPMITM:
         """
         Log the fact that a new client has connected.
         """
-        
-        # Statistics
-        self.statCounter.start()        
 
-        ip = self.client.transport.client[0]
-        port = self.client.transport.client[1]
+        # Statistics
+        self.statCounter.start()
+
+        if self.client.proxyInfo is not None:
+            ip = self.client.proxyInfo.srcAddr
+            port = self.client.proxyInfo.srcPort
+        else:
+            ip = self.client.transport.client[0]
+            port = self.client.transport.client[1]
+
         self.state.clientIp = ip
         self.log.extra['clientIp'] = ip
         self.log.info("New client connected from %(clientIp)s:%(clientPort)i",
