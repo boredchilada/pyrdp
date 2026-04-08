@@ -18,8 +18,12 @@ from Crypto.Cipher import ARC4
 
 
 def _md4(data: bytes) -> bytes:
-    """Compute MD4 hash."""
-    return hashlib.new('md4', data).digest()
+    """Compute MD4 hash. Falls back to pycryptodome if hashlib doesn't support MD4 (Python 3.13+)."""
+    try:
+        return hashlib.new('md4', data).digest()
+    except ValueError:
+        from Crypto.Hash import MD4
+        return MD4.new(data).digest()
 
 
 def _hmacMd5(key: bytes, data: bytes) -> bytes:
