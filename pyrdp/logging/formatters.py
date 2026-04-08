@@ -139,12 +139,18 @@ class SSLSecretFormatter(logging.Formatter):
 
 class NTLMSSPHashFormatter(logging.Formatter):
     """
-    Custom formatter used to log NTLMSSP hashes.
+    Custom formatter used to log NTLMSSP hashes in hashcat-compatible format.
+    Format: user::domain:serverChallenge:NTProofStr:NTResponse
     """
 
     @staticmethod
     def formatNTLMSSPHash(user: str, domain: str, serverChallenge: bytes, proof: bytes, response: bytes) -> str:
-        return f"{user}::{domain}:{serverChallenge.hex()}:{proof.hex()}:{response.hex()}"
+        # Sanitize colons in user/domain — they break the hash format since
+        # colon is the field separator. Attackers sometimes type "user:password"
+        # in the username field during brute force attempts.
+        safeUser = user.replace(":", "_")
+        safeDomain = domain.replace(":", "_")
+        return f"{safeUser}::{safeDomain}:{serverChallenge.hex()}:{proof.hex()}:{response.hex()}"
 
     def format(self, record: logging.LogRecord) -> str:
         user = record.msg
