@@ -11,6 +11,7 @@ from binascii import hexlify
 from twisted.internet.protocol import connectionDone, Protocol
 
 from pyrdp.core import ObservedBy
+from pyrdp.core.proxy_protocol import ProxyProtocolHeader, parseProxyProtocol
 from pyrdp.exceptions import ParsingError, ExploitError
 from pyrdp.layer.layer import IntermediateLayer, LayerObserver
 from pyrdp.logging import LOGGER_NAMES, getSSLLogger
@@ -47,6 +48,10 @@ class TwistedTCPLayer(IntermediateLayer, Protocol):
         super().__init__(TCPParser())
         self.connectedEvent = asyncio.Event()
         self.logSSLRequired = False
+        self.proxyProtocolEnabled = False
+        self.proxyInfo: ProxyProtocolHeader = None
+        self._proxyBuffer = b''
+        self._proxyHeaderParsed = False
 
     def logSSLParameters(self):
         """
@@ -85,6 +90,33 @@ class TwistedTCPLayer(IntermediateLayer, Protocol):
         :param data: bytes received.
         """
         try:
+            if self.proxyProtocolEnabled and not self._proxyHeaderParsed:
+                self._proxyBuffer += data
+                try:
+                    self.proxyInfo = parseProxyProtocol(self._proxyBuffer)
+                    self._proxyHeaderParsed = True
+                    remainder = self._proxyBuffer[self.proxyInfo.rawLength:]
+                    self._proxyBuffer = b''
+                    self.log.debug("PROXY protocol: %(src)s:%(srcPort)s -> %(dst)s:%(dstPort)s (%(cmd)s)", {
+                        "src": self.proxyInfo.srcAddr,
+                        "srcPort": self.proxyInfo.srcPort,
+                        "dst": self.proxyInfo.dstAddr,
+                        "dstPort": self.proxyInfo.dstPort,
+                        "cmd": self.proxyInfo.command,
+                    })
+                    if remainder:
+                        self.dataReceived(remainder)
+                    return
+                except ValueError as e:
+                    if b'\r\n' not in self._proxyBuffer and len(self._proxyBuffer) < 232:
+                        return  # Need more data
+                    self.log.error("Invalid PROXY protocol header: %(error)s (data: %(data)s)", {
+                        "error": str(e),
+                        "data": self._proxyBuffer[:32].hex(),
+                    })
+                    self.transport.loseConnection()
+                    return
+
             if self.logSSLRequired:
                 self.logSSLParameters()
                 self.logSSLRequired = False
@@ -93,7 +125,6 @@ class TwistedTCPLayer(IntermediateLayer, Protocol):
         except KeyboardInterrupt:
             raise
         except ExploitError as e:
-            # Ideally it would be nice to have a system for detecting exploits without interrupting the connection
             self.log.info("Exploit detected: %(exploitInfo)s. %(parserInfo)s", {
                 "exploitInfo": str(e),
                 "parserInfo": e.formatLayer(len(e.layers) - 1)

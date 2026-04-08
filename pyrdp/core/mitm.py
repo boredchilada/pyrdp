@@ -37,4 +37,8 @@ class MITMServerFactory(ServerFactory):
 
         mitm = RDPMITM(mainlogger, crawlerLogger, self.config)
 
-        return mitm.getProtocol()
+        protocol = mitm.getProtocol()
+        if self.config.proxyProtocol:
+            protocol.proxyProtocolEnabled = True
+
+        return protocol
