@@ -108,6 +108,45 @@ class TestGSSWrapEx(unittest.TestCase):
 
 import struct
 
+from pyrdp.security.credssp import buildSpnegoNegTokenInit, buildSpnegoNegTokenResp
+
+
+class TestSPNEGO(unittest.TestCase):
+    def test_negTokenInit_starts_with_application_tag(self):
+        mechToken = b"NTLMSSP\x00" + b"\x01\x00\x00\x00" + b"\x00" * 28  # fake NEGOTIATE
+        result = buildSpnegoNegTokenInit(mechToken)
+        # APPLICATION [0] CONSTRUCTED = 0x60
+        self.assertEqual(result[0], 0x60)
+
+    def test_negTokenInit_contains_spnego_oid(self):
+        mechToken = b"NTLMSSP\x00" + b"\x01\x00\x00\x00" + b"\x00" * 28
+        result = buildSpnegoNegTokenInit(mechToken)
+        # SPNEGO OID 1.3.6.1.5.5.2 = 06 06 2b 06 01 05 05 02
+        self.assertIn(b'\x06\x06\x2b\x06\x01\x05\x05\x02', result)
+
+    def test_negTokenInit_contains_ntlmssp_oid(self):
+        mechToken = b"NTLMSSP\x00" + b"\x01\x00\x00\x00" + b"\x00" * 28
+        result = buildSpnegoNegTokenInit(mechToken)
+        # NTLMSSP OID 1.3.6.1.4.1.311.2.2.10 should be present
+        ntlmsspOidEncoded = bytes([0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a])
+        self.assertIn(ntlmsspOidEncoded, result)
+
+    def test_negTokenInit_contains_mechToken(self):
+        mechToken = b"NTLMSSP\x00" + b"\x01\x00\x00\x00" + b"\x00" * 28
+        result = buildSpnegoNegTokenInit(mechToken)
+        self.assertIn(mechToken, result)
+
+    def test_negTokenResp_starts_with_context_1(self):
+        responseToken = b"NTLMSSP\x00" + b"\x03\x00\x00\x00" + b"\x00" * 60  # fake AUTH
+        result = buildSpnegoNegTokenResp(responseToken)
+        # [1] CONSTRUCTED = 0xA1
+        self.assertEqual(result[0], 0xA1)
+
+    def test_negTokenResp_contains_token(self):
+        responseToken = b"NTLMSSP\x00" + b"\x03\x00\x00\x00" + b"\x00" * 60
+        result = buildSpnegoNegTokenResp(responseToken)
+        self.assertIn(responseToken, result)
+
 
 if __name__ == "__main__":
     unittest.main()
