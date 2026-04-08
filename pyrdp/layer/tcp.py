@@ -97,7 +97,7 @@ class TwistedTCPLayer(IntermediateLayer, Protocol):
                     self._proxyHeaderParsed = True
                     remainder = self._proxyBuffer[self.proxyInfo.rawLength:]
                     self._proxyBuffer = b''
-                    self.log.debug("PROXY protocol: %(src)s:%(srcPort)s -> %(dst)s:%(dstPort)s (%(cmd)s)", {
+                    self.log.info("PROXY protocol: %(src)s:%(srcPort)s -> %(dst)s:%(dstPort)s (%(cmd)s)", {
                         "src": self.proxyInfo.srcAddr,
                         "srcPort": self.proxyInfo.srcPort,
                         "dst": self.proxyInfo.dstAddr,
