@@ -70,11 +70,10 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends \
               build-essential python3-dev \
-              libegl1 libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 \
-              libavcodec58 libavdevice58
+              libegl1 libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1
       - name: Install PyRDP
         working-directory: .
-        run: pip install -U -e .[full]
+        run: pip install -U -e .
 
       - name: Install ci dependencies
         run: pip install -r requirements-ci.txt
@@ -134,7 +133,7 @@ jobs:
         run: pip --version
       - name: Install PyRDP
         working-directory: .
-        run: pip install -U -e .[full]
+        run: pip install -U -e .
       - name: Install coverage
         working-directory: .
         run: pip install coverage
