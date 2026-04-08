@@ -526,6 +526,35 @@ See the [twistd documentation](docs/twistd.md) for more information.
 We developped our own Bettercap module, `rdp.proxy`, to monster-in-the-middle all RDP connections
 on a given LAN. Check out [this document](docs/bettercap-rdp-mitm.md) for more information.
 
+#### Using PyRDP behind a Reverse Proxy (PROXY Protocol)
+
+PyRDP can run behind nginx, HAProxy, or AWS NLB using the [PROXY protocol](https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt) (v1 and v2).
+This is useful for honeypot deployments where you want to hide PyRDP behind a load balancer or reverse proxy while still logging the real client IP.
+
+Start PyRDP with the `--proxy-protocol` flag:
+```
+pyrdp-mitm 192.168.1.10 --proxy-protocol
+```
+
+Configure nginx as a TCP stream proxy:
+```nginx
+stream {
+    upstream pyrdp_backend {
+        server 127.0.0.1:3389;
+    }
+
+    server {
+        listen 3389;
+        proxy_pass pyrdp_backend;
+        proxy_protocol on;
+    }
+}
+```
+
+When `--proxy-protocol` is enabled, PyRDP expects a PROXY protocol header at the start of every connection. Both v1 (text) and v2 (binary) formats are auto-detected. The real client IP from the header is used in all log entries, JSON connection logs, and replay filenames.
+
+Without `--proxy-protocol`, PyRDP works as before with direct connections.
+
 ### Docker Specific Usage Instructions
 
 Since docker restricts the interactions with the host system (filesystem and network), the PyRDP docker image must be run with some parameters depending on your use case. This section documents those parameters.
