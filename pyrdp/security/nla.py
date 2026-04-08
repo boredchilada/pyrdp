@@ -7,6 +7,7 @@
 import logging
 import codecs
 import secrets
+from typing import Callable, Optional
 
 from pyrdp.enum import NTLMSSPMessageType
 from pyrdp.layer import SegmentationObserver, IntermediateLayer
@@ -24,11 +25,14 @@ class NLAHandler(SegmentationObserver):
     This also logs the hash of NLA connection attempts.
     """
 
-    def __init__(self, sink: IntermediateLayer, state: NTLMSSPState, log: logging.LoggerAdapter, ntlmCapture: bool = False, challenge: str = None):
+    def __init__(self, sink: IntermediateLayer, state: NTLMSSPState, log: logging.LoggerAdapter,
+                 ntlmCapture: bool = False, challenge: str = None,
+                 disconnectCallback: Optional[Callable[[], None]] = None):
         """
         Create a new NLA Handler.
         sink: layer to forward packets to.
         state: NTLMSSPState that is shared between both the client-facing handler and the server-facing handler.
+        disconnectCallback: called after hash capture to trigger clean connection teardown.
         """
 
         super().__init__()
@@ -38,6 +42,7 @@ class NLAHandler(SegmentationObserver):
         self.ntlmCapture = ntlmCapture
         self.challenge = challenge
         self.log = log
+        self.disconnectCallback = disconnectCallback
 
     def getChallenge(self):
         """
@@ -60,14 +65,14 @@ class NLAHandler(SegmentationObserver):
                 rawChallenge = self.getChallenge()
                 self.log.debug("NTLMSSP Negotiation")
                 challenge: NTLMSSPChallengePDU = NTLMSSPChallengePDU(rawChallenge)
-                
+
                 # There might be no state if server side connection was shutdown
                 if not self.ntlmSSPState:
                     self.ntlmSSPState = NTLMSSPState()
                 self.ntlmSSPState.setMessage(challenge)
                 self.ntlmSSPState.challenge.serverChallenge = rawChallenge
                 data = self.ntlmSSPParser.writeNTLMSSPChallenge('WINNT', rawChallenge)
-            
+
             if message.messageType == NTLMSSPMessageType.AUTHENTICATE_MESSAGE:
                 message: NTLMSSPAuthenticatePDU
                 user = message.user
@@ -82,5 +87,17 @@ class NLAHandler(SegmentationObserver):
                 self.log.info("[!] NTLMSSP Hash: %(ntlmSSPHash)s", {
                     "ntlmSSPHash": (ntlmSSPHash)
                 })
+
+                if self.ntlmCapture:
+                    # Send a clean CredSSP error instead of letting the TLS tunnel die
+                    errorResponse = self.ntlmSSPParser.writeTSRequestError(
+                        version=6,
+                        errorCode=0xC000006D  # STATUS_LOGON_FAILURE
+                    )
+                    self.sink.sendBytes(errorResponse)
+
+                    if self.disconnectCallback:
+                        self.disconnectCallback()
+                    return  # Don't forward to server
 
         self.sink.sendBytes(data)
