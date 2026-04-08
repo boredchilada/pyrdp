@@ -399,7 +399,17 @@ class RDPMITM:
 
             # CredSSP is done. The server is now ready for normal RDP (MCS etc.)
             # The client side doesn't need NLA — it already got a TLS-only response.
-            # Remove the temporary handler and let normal RDP proceed.
+            # The normal MITM layers (TPKT, X224, MCS, etc.) are already wired and will
+            # handle data flowing between client and server.
+            log.info("CredSSP complete. Normal RDP MITM flow is now active.")
+
+            # Reset the ntlmCapture flag so any subsequent X224 handling works normally
+            self.state.ntlmCapture = False
+
+            # Give the server a moment to process the credentials before MCS data arrives
+            import asyncio
+            await asyncio.sleep(0.5)
+            log.info("Server ready for MCS data.")
 
         except asyncio.TimeoutError:
             log.error("CredSSP exchange timed out")
