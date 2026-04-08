@@ -94,6 +94,9 @@ class MITMConfig:
         self.proxyProtocol: bool = False
         """Whether to expect PROXY protocol headers on incoming connections."""
 
+        self.nlaFallback: bool = False
+        """When True, skip credential-replay CredSSP and only capture NTLM hash + disconnect cleanly."""
+
     @property
     def replayDir(self) -> Path:
         """
