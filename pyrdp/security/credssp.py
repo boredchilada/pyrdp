@@ -137,3 +137,108 @@ def computePubKeyAuth(exportedSessionKey: bytes, serverPublicKey: bytes,
         message = serverPublicKey
 
     return gssWrapEx(signKey, sealKey, 0, message)
+
+
+def _encodeOid(oid: list) -> bytes:
+    """BER-encode an OID value (just the value bytes, no tag/length)."""
+    result = bytearray()
+    result.append(40 * oid[0] + oid[1])
+    for component in oid[2:]:
+        if component < 128:
+            result.append(component)
+        else:
+            # Multi-byte encoding
+            encoded = []
+            while component > 0:
+                encoded.append(component & 0x7F)
+                component >>= 7
+            encoded.reverse()
+            for i in range(len(encoded) - 1):
+                encoded[i] |= 0x80
+            result.extend(encoded)
+    return bytes(result)
+
+
+def _berWriteTagLenVal(tag: int, value: bytes) -> bytes:
+    """Write a BER TLV (tag + length + value)."""
+    result = bytearray()
+    result.append(tag)
+    length = len(value)
+    if length < 128:
+        result.append(length)
+    elif length < 256:
+        result.append(0x81)
+        result.append(length)
+    else:
+        result.append(0x82)
+        result.extend(struct.pack('>H', length))
+    result.extend(value)
+    return bytes(result)
+
+
+# OIDs
+SPNEGO_OID = [1, 3, 6, 1, 5, 5, 2]
+NTLMSSP_OID = [1, 3, 6, 1, 4, 1, 311, 2, 2, 10]
+
+
+def buildSpnegoNegTokenInit(mechToken: bytes) -> bytes:
+    """
+    Build SPNEGO NegTokenInit wrapping an NTLMSSP message.
+    Used for the first CredSSP message (NTLM NEGOTIATE).
+
+    Structure:
+    APPLICATION [0] {
+        OID spnego
+        [0] NegTokenInit {
+            [0] MechTypeList { OID ntlmssp }
+            [2] mechToken
+        }
+    }
+    """
+    # MechType OID
+    oidValue = _encodeOid(NTLMSSP_OID)
+    oidTlv = _berWriteTagLenVal(0x06, oidValue)
+
+    # MechTypeList = SEQUENCE OF MechType
+    mechTypeList = _berWriteTagLenVal(0x30, oidTlv)
+
+    # [0] mechTypes
+    mechTypes = _berWriteTagLenVal(0xA0, mechTypeList)
+
+    # [2] mechToken
+    mechTokenOctet = _berWriteTagLenVal(0x04, mechToken)
+    mechTokenCtx = _berWriteTagLenVal(0xA2, mechTokenOctet)
+
+    # NegTokenInit = SEQUENCE { mechTypes, mechToken }
+    negTokenInit = _berWriteTagLenVal(0x30, mechTypes + mechTokenCtx)
+
+    # [0] CONSTRUCTED wrapping the NegTokenInit
+    negTokenInitCtx = _berWriteTagLenVal(0xA0, negTokenInit)
+
+    # SPNEGO OID
+    spnegoOidValue = _encodeOid(SPNEGO_OID)
+    spnegoOidTlv = _berWriteTagLenVal(0x06, spnegoOidValue)
+
+    # APPLICATION [0] CONSTRUCTED (tag 0x60)
+    return _berWriteTagLenVal(0x60, spnegoOidTlv + negTokenInitCtx)
+
+
+def buildSpnegoNegTokenResp(responseToken: bytes) -> bytes:
+    """
+    Build SPNEGO NegTokenResp wrapping an NTLMSSP message.
+    Used for subsequent CredSSP messages (NTLM AUTHENTICATE).
+
+    Structure:
+    [1] NegTokenResp {
+        [2] responseToken
+    }
+    """
+    # responseToken as OCTET STRING
+    tokenOctet = _berWriteTagLenVal(0x04, responseToken)
+    tokenCtx = _berWriteTagLenVal(0xA2, tokenOctet)
+
+    # NegTokenResp = SEQUENCE { responseToken }
+    negTokenResp = _berWriteTagLenVal(0x30, tokenCtx)
+
+    # [1] CONSTRUCTED
+    return _berWriteTagLenVal(0xA1, negTokenResp)
