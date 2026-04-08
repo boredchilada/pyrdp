@@ -131,6 +131,11 @@ def buildArgParser():
     parser.add_argument("--nla-redirection-host", help="Redirection target ip if NLA is enforced", default=None)
     parser.add_argument("--nla-redirection-port", help="Redirection target port if NLA is enforced", type=int, default=None)
     parser.add_argument("--ssp-challenge", help="Set challenge for SSP authentictation (e.g. 1122334455667788). Incompatible with --auth ssp.", type=str, default=None)
+    parser.add_argument("--proxy-protocol",
+        help="Enable PROXY protocol v1/v2 support. Use when PyRDP is behind "
+             "nginx, HAProxy, or AWS NLB. The proxy must send a PROXY protocol "
+             "header so PyRDP can see the real client IP.",
+        action="store_true")
 
     return parser
 
@@ -213,6 +218,7 @@ def configure(cmdline=None) -> MITMConfig:
     config.redirectionHost = args.nla_redirection_host
     config.redirectionPort = args.nla_redirection_port
     config.sspChallenge = args.ssp_challenge
+    config.proxyProtocol = args.proxy_protocol
 
     payload = None
     powershell = None

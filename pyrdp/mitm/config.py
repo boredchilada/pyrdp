@@ -91,6 +91,9 @@ class MITMConfig:
         self.redirectionPort = None
         """Port of the redirection host"""
 
+        self.proxyProtocol: bool = False
+        """Whether to expect PROXY protocol headers on incoming connections."""
+
     @property
     def replayDir(self) -> Path:
         """
