@@ -11,6 +11,8 @@ For a detailed view of what has changed, refer to the {uri-repo}/commits/master[
 === Enhancements
 
 * PROXY protocol v1/v2 support: `--proxy-protocol` flag allows PyRDP to run behind nginx, HAProxy, or AWS NLB while preserving real client IPs in logs
+* CredSSP/NLA authentication: when the server requires NLA, PyRDP can now authenticate via CredSSP using `-u`/`-p` replacement credentials, enabling MITM of NLA-enforcing servers
+* Clean NLA hash capture: `--nla-fallback` flag captures NTLM hashes and disconnects gracefully (no more SSL errors in logs)
 * Handles unknown NTSTATUS gracefully ({uri-issue}471[#471])
 * JSON logs field change: data becomes exceptionData
 
