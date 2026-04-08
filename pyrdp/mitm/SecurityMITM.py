@@ -117,6 +117,13 @@ class SecurityMITM:
         self.state.capturedUsername = pdu.username
         self.state.capturedPassword = pdu.password
 
+        authMethod = "NLA/CredSSP" if self.state.serverRequiresNLA else "TLS"
+        self.log.info("[+] Session authenticated (%(method)s): user=%(user)r domain=%(domain)r", {
+            "method": authMethod,
+            "user": pdu.username,
+            "domain": pdu.domain,
+        })
+
         # Fleet event: login_success (credentials captured and forwarded)
         self.log.info("login_success", {
             "event_type": "login_success",

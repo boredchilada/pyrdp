@@ -4,6 +4,7 @@
 # Licensed under the GPLv3 or later.
 #
 
+import sys
 from io import BufferedIOBase
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -104,7 +105,7 @@ class FileLayer(LayerChainItem):
         # Buffer data until we have enough bytes for a meaningful replay.
         self.pending = b''
 
-        self.filename = fileName
+        self.filename = str(fileName).replace(":", "_") if sys.platform == "win32" else fileName
         self.fd: BufferedIOBase = None
 
     def sendBytes(self, data: bytes):
