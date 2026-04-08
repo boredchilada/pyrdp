@@ -12,7 +12,7 @@ from pyrdp.enum import PointerFlag, ScanCode
 from pyrdp.enum.scancode import getKeyName
 from pyrdp.pdu.pdu import PDU
 from pyrdp.layer.layer import Layer
-from pyrdp.logging.StatCounter import StatCounter, STAT
+from pyrdp.logging.StatCounter import StatCounter
 
 # Flush post-login keystroke buffer after this many seconds of inactivity
 KEYSTROKE_FLUSH_TIMEOUT = 2.0
