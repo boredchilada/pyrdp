@@ -242,3 +242,93 @@ def buildSpnegoNegTokenResp(responseToken: bytes) -> bytes:
 
     # [1] CONSTRUCTED
     return _berWriteTagLenVal(0xA1, negTokenResp)
+
+
+def buildTSRequest(version: int, negoTokens: bytes = None, pubKeyAuth: bytes = None,
+                   authInfo: bytes = None, errorCode: int = None, clientNonce: bytes = None) -> bytes:
+    """
+    Build a CredSSP TSRequest PDU (BER-encoded).
+
+    TSRequest ::= SEQUENCE {
+        version    [0] INTEGER,
+        negoTokens [1] NegoData OPTIONAL,
+        authInfo   [2] OCTET STRING OPTIONAL,
+        pubKeyAuth [3] OCTET STRING OPTIONAL,
+        errorCode  [4] INTEGER OPTIONAL,
+        clientNonce [5] OCTET STRING OPTIONAL
+    }
+    """
+    from pyrdp.core import ber
+
+    inner = bytearray()
+
+    # [0] version
+    inner.extend(ber.writeContextualTag(0, 3))
+    inner.extend(ber.writeInteger(version))
+
+    # [1] negoTokens
+    if negoTokens is not None:
+        tokenOctet = ber.writeOctetString(negoTokens)
+        tokenCtx = _berWriteTagLenVal(0xA0, tokenOctet)
+        innerSeq = _berWriteTagLenVal(0x30, tokenCtx)
+        outerSeq = _berWriteTagLenVal(0x30, innerSeq)
+        inner.extend(_berWriteTagLenVal(0xA1, outerSeq))
+
+    # [2] authInfo
+    if authInfo is not None:
+        authOctet = ber.writeOctetString(authInfo)
+        inner.extend(_berWriteTagLenVal(0xA2, authOctet))
+
+    # [3] pubKeyAuth
+    if pubKeyAuth is not None:
+        pubKeyOctet = ber.writeOctetString(pubKeyAuth)
+        inner.extend(_berWriteTagLenVal(0xA3, pubKeyOctet))
+
+    # [4] errorCode
+    if errorCode is not None:
+        errorBytes = errorCode.to_bytes(4, byteorder='big')
+        errorInt = _berWriteTagLenVal(0x02, errorBytes)
+        inner.extend(_berWriteTagLenVal(0xA4, errorInt))
+
+    # [5] clientNonce
+    if clientNonce is not None:
+        nonceOctet = ber.writeOctetString(clientNonce)
+        inner.extend(_berWriteTagLenVal(0xA5, nonceOctet))
+
+    # Outer SEQUENCE
+    return _berWriteTagLenVal(0x30, bytes(inner))
+
+
+def buildTSCredentials(domain: str, username: str, password: str) -> bytes:
+    """
+    Build TSCredentials structure (to be encrypted with GSS_WrapEx).
+
+    TSCredentials ::= SEQUENCE {
+        credType    [0] INTEGER (1 = password),
+        credentials [1] OCTET STRING (DER-encoded TSPasswordCreds)
+    }
+
+    TSPasswordCreds ::= SEQUENCE {
+        domainName [0] OCTET STRING (UTF-16LE),
+        userName   [1] OCTET STRING (UTF-16LE),
+        password   [2] OCTET STRING (UTF-16LE)
+    }
+    """
+    from pyrdp.core import ber
+
+    # TSPasswordCreds
+    domainBytes = domain.encode('utf-16-le')
+    userBytes = username.encode('utf-16-le')
+    passBytes = password.encode('utf-16-le')
+
+    passCreds = bytearray()
+    passCreds.extend(_berWriteTagLenVal(0xA0, ber.writeOctetString(domainBytes)))
+    passCreds.extend(_berWriteTagLenVal(0xA1, ber.writeOctetString(userBytes)))
+    passCreds.extend(_berWriteTagLenVal(0xA2, ber.writeOctetString(passBytes)))
+    passCredsSeq = _berWriteTagLenVal(0x30, bytes(passCreds))
+
+    # TSCredentials
+    tsCreds = bytearray()
+    tsCreds.extend(_berWriteTagLenVal(0xA0, _berWriteTagLenVal(0x02, b'\x01')))  # credType = 1
+    tsCreds.extend(_berWriteTagLenVal(0xA1, ber.writeOctetString(passCredsSeq)))
+    return _berWriteTagLenVal(0x30, bytes(tsCreds))
