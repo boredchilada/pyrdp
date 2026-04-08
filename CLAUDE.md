@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyRDP is a Python RDP (Remote Desktop Protocol) Monster-in-the-Middle tool and library by GoSecure. It intercepts RDP connections, logs credentials, steals clipboard/files, records sessions, and supports replay/conversion. Version 2.1.1.dev0, GPLv3+, Python 3.7–3.13.
+PyRDP is a Python RDP (Remote Desktop Protocol) Monster-in-the-Middle tool and library by GoSecure. It intercepts RDP connections, logs credentials, steals clipboard/files, records sessions, and supports replay/conversion. Version 2.2.1.dev0, GPLv3+, Python 3.9–3.13.
 
 ## Build & Install
 
@@ -70,6 +70,15 @@ read PROXY protocol v1/v2 headers and log the real client IP instead of the prox
 pyrdp-mitm 192.168.1.100:3389 --proxy-protocol
 ```
 
+**Important**: With `--proxy-protocol` enabled, direct mstsc connections will fail (PyRDP waits for a PROXY header that never comes). Only use when all connections go through a proxy that sends PROXY headers.
+Tested with the Go RDP fingerprint proxy (`rdp-proxy`) which sends PROXY v2 headers.
+
+## Credential Handling (-u/-p)
+
+- **With `-u`/`-p`**: PyRDP performs CredSSP to server with replacement creds. Client is told TLS-only (no NLA). Whatever the attacker types is captured, then replaced — they always get in.
+- **Without `-u`/`-p`**: NLA passthrough — client's NTLM auth forwarded to server. Hash captured either way. Only valid creds get in.
+- **With `--nla-fallback`**: Capture hash and disconnect cleanly. No session established.
+
 ## Architecture
 
 ### Layer-Based Protocol Stack
@@ -115,6 +124,25 @@ Built on **Twisted** for async I/O. The `twisted/` directory at repo root contai
 - **%-style formatting for log statements only** (for analysis purposes): `logging.info("Hello %(who)s!", {"who": "World"})`
 - Docstrings in reStructuredText syntax
 
+## Fleet Logging (mitm.json)
+
+`mitm.json` emits fleet-standard NDJSON events with 11 mandatory fields per LOGGING_STANDARD.md.
+Event types: `connection_open`, `login_success`, `keystroke_capture`, `exploit_attempt`, `file_write`, `file_delete`, `file_rename`, `connection_close`.
+The `connection_close` event contains full session summary: RDP fingerprint, client info, NTLM info, server cert, stats, replay filename.
+Session correlation: `session` field uses MD5(IP:date) for cross-reconnect correlation; `session_id` is the per-connection PyRDP name.
+Config: `DEST_IP` and `DEST_PORT` env vars set the honeypot identity in fleet events.
+Handler level is INFO-only so DEBUG PDU noise stays out of the JSON file.
+
+## Intelligence Collection
+
+- **OS fingerprinting**: `fingerprint.py` decodes clientBuild→"Windows 11 22H2", keyboardLayout→"en-US", NTLM version bytes
+- **Client identity**: clientDigProductId, serial, physical display size, DPI scaling, timezone, performance flags — all in `state.rdpFingerprint` and `state.clientInfo`
+- **NTLM**: workstation, negotiate flags, OS version extracted from wire data → `state.ntlmInfo`
+- **Server cert**: SHA256, subject, issuer, validity logged before cloning → `state.serverCertInfo`
+- **Post-login keystrokes**: buffered flush on Enter/2s idle/500 chars → `keystroke_capture` fleet events
+- **File operations**: IRP_MJ_WRITE, IRP_MJ_SET_INFORMATION handlers in DeviceRedirectionMITM for write/delete/rename detection
+- **Null bytes**: all credential and client info strings stripped of \x00 in logs and JSON
+
 ## NLA/CredSSP Architecture
 
 When the server enforces NLA (`HYBRID_REQUIRED_BY_SERVER`), PyRDP performs CredSSP on behalf of the client:
@@ -131,5 +159,5 @@ Key files: `RDPMITM.py` (_performServerCredSSP), `X224MITM.py` (onConnectionConf
 ## Windows Operational Notes
 
 - **One MITM instance at a time when testing** — multiple instances can cause server-side CredSSP session conflicts from the same source IP
-- **Port reuse after kill**: `SO_REUSEADDR` is not set on Windows; forcefully killed processes leave sockets in TIME_WAIT. Wait a few seconds or use a different port
+- **Port reuse after kill**: `SO_REUSEADDR` is now always set. Graceful shutdown handler stops listener and cancels async tasks. Forcefully killed processes may still leave sockets in TIME_WAIT briefly
 - **Kill by PID, not by process name**: `taskkill /F /PID <pid>` — don't `taskkill /F /IM python.exe` as it kills unrelated Python processes
