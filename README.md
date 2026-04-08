@@ -17,6 +17,12 @@ It features a few tools:
     - Crawls shared drives in the background and saves them locally
     - Saves replays of connections so you can look at them later
     - Runs console commands or PowerShell payloads automatically on new connections
+    - Structured JSON event logging (NDJSON) with session correlation for SIEM ingestion
+    - Client fingerprinting: OS version, keyboard locale, display config, digital product ID, timezone
+    - Post-login keystroke capture with buffered output
+    - Server TLS certificate logging (subject, issuer, SHA256 fingerprint)
+    - NTLM intelligence: workstation name, negotiate flags, OS version from wire data
+    - File write, delete, and rename detection via device redirection
 - RDP Player:
     - See live RDP connections coming from the MITM
     - View replays of RDP connections
@@ -58,9 +64,9 @@ research use cases in mind.
 
 
 ## Supported Systems
-PyRDP should work on Python 3.7 and up on the x86-64, ARM and ARM64 platforms.
+PyRDP should work on Python 3.9 and up on the x86-64, ARM and ARM64 platforms.
 
-This tool has been tested to work on Python 3.7 on Linux (Ubuntu 20.04, 22.04), Raspberry Pi and Windows. It has not been tested on macOS.
+This tool has been tested to work on Python 3.9+ on Linux (Ubuntu 20.04, 22.04), Raspberry Pi and Windows. It has not been tested on macOS.
 
 
 ## Installing
