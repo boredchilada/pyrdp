@@ -238,6 +238,14 @@ class RDPMITM:
 
         # Handle NLA connection for client/server
         ntlmSSPState = NTLMSSPState()
+
+        if self.state.serverRequiresNLA and self.config.replacementUsername and self.config.replacementPassword:
+            # Server requires NLA and we have credentials — perform CredSSP ourselves
+            self.log.info("Performing CredSSP authentication to server with replacement credentials.")
+            from pyrdp.core import defer
+            defer(self._performServerCredSSP())
+            return
+
         if self.state.ntlmCapture:
             # We are capturing the NLA NTLMv2 hash
             self.client.segmentation.addObserver(NLAHandler(
@@ -249,6 +257,159 @@ class RDPMITM:
 
         self.client.segmentation.addObserver(NLAHandler(self.server.tcp, ntlmSSPState, self.getLog("ntlmssp")))
         self.server.segmentation.addObserver(NLAHandler(self.client.tcp, ntlmSSPState, self.getLog("ntlmssp")))
+
+    async def _performServerCredSSP(self):
+        """
+        Perform CredSSP authentication to the server using replacement credentials.
+        This is called when the server requires NLA and we have -u/-p configured.
+        After CredSSP succeeds, the server-side connection is ready for normal RDP.
+        The client side gets a TLS-only response (no NLA).
+        """
+        import ssl as stdlib_ssl
+        import struct
+        import time
+        from OpenSSL import crypto
+        from impacket import ntlm as impacket_ntlm
+        from impacket.spnego import SPNEGO_NegTokenInit, SPNEGO_NegTokenResp
+        from Crypto.Cipher import ARC4
+        from pyrdp.security.credssp import (
+            buildTSRequest, buildTSCredentials, buildSpnegoNegTokenInit, buildSpnegoNegTokenResp
+        )
+
+        log = self.getLog("credssp")
+        username = self.config.replacementUsername
+        password = self.config.replacementPassword
+        # Use domain from config or empty string
+        domain = ""
+
+        # The server TLS connection is already established at this point.
+        # We need to send/receive CredSSP TSRequests through the raw TLS transport.
+        # Use the Twisted transport directly.
+        serverTransport = self.server.tcp.transport
+
+        # Get server's TLS certificate and extract public key
+        serverCert = serverTransport.getPeerCertificate()
+        if not serverCert:
+            log.error("Cannot perform CredSSP: server certificate not available")
+            self.client.tcp.disconnect()
+            return
+
+        certDer = crypto.dump_certificate(crypto.FILETYPE_ASN1, serverCert)
+        x509cert = crypto.load_certificate(crypto.FILETYPE_ASN1, certDer)
+        pkey = x509cert.get_pubkey()
+        dump = crypto.dump_publickey(crypto.FILETYPE_ASN1, pkey)
+        serverPubKey = dump[24:]  # Strip ASN.1 header to get raw SubjectPublicKey
+        log.info("Server TLS public key: %(size)d bytes", {"size": len(serverPubKey)})
+
+        NTLMSSP_OID = b'+\x06\x01\x04\x01\x827\x02\x02\n'
+
+        # We need a way to send/receive through the TLS connection.
+        # Since Twisted's TLS is event-driven, we use a Future to wait for responses.
+        responseQueue = asyncio.Queue()
+
+        # Temporarily intercept server data at the segmentation layer
+        from pyrdp.layer import SegmentationObserver
+
+        class CredSSPResponseHandler(SegmentationObserver):
+            def onUnknownHeader(self, header, data: bytes):
+                asyncio.get_event_loop().call_soon_threadsafe(responseQueue.put_nowait, data)
+
+        credSSPHandler = CredSSPResponseHandler()
+        self.server.segmentation.addObserver(credSSPHandler)
+
+        try:
+            # Step 1: Send NTLM NEGOTIATE
+            auth = impacket_ntlm.getNTLMSSPType1('', '', True, use_ntlmv2=True)
+            blob = SPNEGO_NegTokenInit()
+            blob['MechTypes'] = [NTLMSSP_OID]
+            blob['MechToken'] = auth.getData()
+            tsReq1 = buildTSRequest(version=2, negoTokens=blob.getData())
+            self.server.tcp.sendBytes(tsReq1)
+            log.debug("Sent CredSSP NEGOTIATE")
+
+            # Step 2: Receive CHALLENGE
+            resp2 = await asyncio.wait_for(responseQueue.get(), timeout=10.0)
+            # Find NTLMSSP in response
+            ntlmIdx = resp2.find(b'NTLMSSP\x00')
+            if ntlmIdx == -1:
+                log.error("No NTLMSSP in server CredSSP response")
+                self.client.tcp.disconnect()
+                return
+            rawChallenge = resp2[ntlmIdx:]
+
+            # Extract NetBIOS domain from challenge TargetInfo
+            from impacket.ntlm import NTLMAuthChallenge
+            challengeMsg = NTLMAuthChallenge(rawChallenge)
+            targetInfo = challengeMsg['TargetInfoFields']
+            # Try to get NetBIOS domain
+            try:
+                avPairs = impacket_ntlm.AV_PAIRS(challengeMsg['TargetInfoFields'])
+                if impacket_ntlm.NTLMSSP_AV_NB_DOMAIN_NAME in avPairs:
+                    domain = avPairs[impacket_ntlm.NTLMSSP_AV_NB_DOMAIN_NAME][1].decode('utf-16-le')
+                    log.info("CredSSP NetBIOS domain: %(domain)s", {"domain": domain})
+            except Exception:
+                pass
+
+            log.debug("Received CredSSP CHALLENGE")
+
+            # Step 3: Build AUTHENTICATE + pubKeyAuth
+            type3, exportedSessionKey = impacket_ntlm.getNTLMSSPType3(
+                auth, rawChallenge, username, password, domain,
+                lmhash='', nthash='', use_ntlmv2=True
+            )
+            flags = type3['flags']
+
+            clientSigningKey = impacket_ntlm.SIGNKEY(flags, exportedSessionKey)
+            clientSealingKey = impacket_ntlm.SEALKEY(flags, exportedSessionKey)
+            cipher = ARC4.new(clientSealingKey)
+            clientSealingHandle = cipher.encrypt
+
+            # Encrypt server public key
+            sealedPubKey, signature = impacket_ntlm.SEAL(
+                flags, clientSigningKey, clientSealingKey,
+                serverPubKey, serverPubKey, 0, clientSealingHandle
+            )
+
+            blob3 = SPNEGO_NegTokenResp()
+            blob3['ResponseToken'] = type3.getData()
+            pubKeyAuth = signature.getData() + sealedPubKey
+
+            tsReq3 = buildTSRequest(version=2, negoTokens=blob3.getData(), pubKeyAuth=pubKeyAuth)
+            self.server.tcp.sendBytes(tsReq3)
+            log.debug("Sent CredSSP AUTHENTICATE + pubKeyAuth")
+
+            # Step 4: Receive pubKeyAuth confirmation
+            resp4 = await asyncio.wait_for(responseQueue.get(), timeout=10.0)
+            if resp4[0] != 0x30:
+                log.error("Unexpected CredSSP response: 0x%(byte)02x", {"byte": resp4[0]})
+                self.client.tcp.disconnect()
+                return
+            log.info("Server confirmed pubKeyAuth — CredSSP authentication successful!")
+
+            # Step 5: Send TSCredentials
+            tsCreds = buildTSCredentials(domain, username, password)
+            sealedCreds, credSig = impacket_ntlm.SEAL(
+                flags, clientSigningKey, clientSealingKey,
+                tsCreds, tsCreds, 1, clientSealingHandle
+            )
+            encCreds = credSig.getData() + sealedCreds
+            tsReq5 = buildTSRequest(version=2, authInfo=encCreds)
+            self.server.tcp.sendBytes(tsReq5)
+            log.info("Sent encrypted credentials — CredSSP exchange complete!")
+
+            # CredSSP is done. The server is now ready for normal RDP (MCS etc.)
+            # The client side doesn't need NLA — it already got a TLS-only response.
+            # Remove the temporary handler and let normal RDP proceed.
+
+        except asyncio.TimeoutError:
+            log.error("CredSSP exchange timed out")
+            self.client.tcp.disconnect()
+        except Exception as e:
+            log.error("CredSSP exchange failed: %(error)s", {"error": str(e)})
+            self.log.exception(e)
+            self.client.tcp.disconnect()
+        finally:
+            self.server.segmentation.removeObserver(credSSPHandler)
 
     def startTLS(self, onTlsReady: typing.Callable[[], None]):
         """
