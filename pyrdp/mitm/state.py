@@ -90,6 +90,18 @@ class RDPMITMState:
         self.ntlmCapture = False
         """Hijack connection from server and capture NTML hash"""
 
+        self.serverRequiresNLA: bool = False
+        """True if server responded with HYBRID_REQUIRED_BY_SERVER"""
+
+        self.capturedCredentials: tuple = None
+        """(username, password, domain) captured from Client Info PDU, or None"""
+
+        self.handshakeBuffer: list = []
+        """Buffered client handshake PDUs for replay to server after CredSSP"""
+
+        self.pendingServerCredSSP: bool = False
+        """True while waiting for client credentials before connecting to server"""
+
         self.securitySettings.addObserver(self.crypters[ParserMode.CLIENT])
         self.securitySettings.addObserver(self.crypters[ParserMode.SERVER])
 
