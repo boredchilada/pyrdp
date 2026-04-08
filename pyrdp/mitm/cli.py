@@ -136,6 +136,11 @@ def buildArgParser():
              "nginx, HAProxy, or AWS NLB. The proxy must send a PROXY protocol "
              "header so PyRDP can see the real client IP.",
         action="store_true")
+    parser.add_argument("--nla-fallback",
+        help="When the server requires NLA, only capture the NTLM hash and "
+             "disconnect cleanly. Do not attempt credential-replay CredSSP. "
+             "Use this if you only need hashes, not full sessions.",
+        action="store_true")
 
     return parser
 
@@ -219,6 +224,7 @@ def configure(cmdline=None) -> MITMConfig:
     config.redirectionPort = args.nla_redirection_port
     config.sspChallenge = args.ssp_challenge
     config.proxyProtocol = args.proxy_protocol
+    config.nlaFallback = args.nla_fallback
 
     payload = None
     powershell = None
