@@ -104,7 +104,7 @@ jobs:
 
       - name: Run unit tests
         working-directory: ./
-        run: coverage run --append -m unittest discover -v
+        run: coverage run --append -m unittest discover -s test -v
 
       - name: Coverage report
         working-directory: ./
@@ -162,7 +162,7 @@ jobs:
 
       - name: Run unit tests
         working-directory: ./
-        run: coverage run --append -m unittest discover -v
+        run: coverage run --append -m unittest discover -s test -v
 
       - name: Coverage report
         working-directory: ./
