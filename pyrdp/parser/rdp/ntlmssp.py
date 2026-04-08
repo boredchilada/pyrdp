@@ -179,6 +179,34 @@ class NTLMSSPParser(Parser):
         stream.write(ber.writeContextualTag(0, negoLen + 4))
         stream.write(ber.writeOctetString(negoTokens))
 
+    def writeTSRequestError(self, version: int, errorCode: int) -> bytes:
+        """
+        Serialize a TSRequest containing only version and errorCode.
+        Used to send a clean CredSSP error back to the client after hash capture.
+        """
+        stream = BytesIO()
+        inner = BytesIO()
+
+        # [0] version
+        inner.write(ber.writeContextualTag(0, 3))
+        inner.write(ber.writeInteger(version))
+
+        # [4] errorCode — encode as unsigned 32-bit big-endian
+        errorBytes = errorCode.to_bytes(4, byteorder='big')
+        errorTagged = BytesIO()
+        errorTagged.write(ber.writeContextualTag(4, 2 + len(errorBytes)))
+        errorTagged.write(ber.writeUniversalTag(ber.Tag.BER_TAG_INTEGER, False))
+        errorTagged.write(ber.writeLength(len(errorBytes)))
+        errorTagged.write(errorBytes)
+        inner.write(errorTagged.getvalue())
+
+        innerData = inner.getvalue()
+        stream.write(ber.writeUniversalTag(ber.Tag.BER_TAG_SEQUENCE, True))
+        stream.write(ber.writeLength(len(innerData)))
+        stream.write(innerData)
+
+        return stream.getvalue()
+
     def writeNTLMSSPChallengePayload(self, stream: BytesIO, workstation: str) -> int:
         """
         Write CHALLENGE message payload and AV_PAIRS
