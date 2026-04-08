@@ -228,9 +228,6 @@ class CacheBitmapV3(CacheBitmap):
         self.flags = (flags & 0x0000FF80) >> 7
         bitsPerPixelId = (flags & 0x00000078) >> 3
 
-        # The spec says this should never be 0, but it is...
-        self.bpp = CBR23_BPP[bitsPerPixelId]
-
         self.cacheIndex = Uint16LE.unpack(s)
         self.key1 = Uint32LE.unpack(s)
         self.key2 = Uint32LE.unpack(s)

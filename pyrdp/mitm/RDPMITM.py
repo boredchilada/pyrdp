@@ -225,6 +225,7 @@ class RDPMITM:
         if not cert:
             # Wait for server certificate
             reactor.callLater(1, self.doClientTls)
+            return
 
         # Log server certificate details for intelligence collection
         try:
@@ -667,7 +668,7 @@ class RDPMITM:
             return 200
 
         def sendPayload() -> int:
-            return self.attacker.sendText(self.config.payload + " & exit")
+            return self.attacker.sendText(self.config.payload + " && exit")
 
         def waitForPayload() -> int:
             return self.config.payloadDuration
