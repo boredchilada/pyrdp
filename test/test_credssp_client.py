@@ -148,5 +148,54 @@ class TestSPNEGO(unittest.TestCase):
         self.assertIn(responseToken, result)
 
 
+from pyrdp.security.credssp import buildTSRequest, buildTSCredentials
+
+
+class TestTSRequest(unittest.TestCase):
+    def test_buildTSRequest_version_only(self):
+        result = buildTSRequest(version=6)
+        # Should be a BER SEQUENCE
+        self.assertEqual(result[0], 0x30)
+        self.assertGreater(len(result), 4)
+
+    def test_buildTSRequest_with_negoTokens(self):
+        negoTokens = b"NTLMSSP\x00" + b"\x01\x00\x00\x00" + b"\x00" * 28
+        result = buildTSRequest(version=2, negoTokens=negoTokens)
+        self.assertEqual(result[0], 0x30)
+        # Should contain the NTLMSSP token somewhere inside
+        self.assertIn(b"NTLMSSP\x00", result)
+
+    def test_buildTSRequest_with_pubKeyAuth(self):
+        pubKeyAuth = os.urandom(64)
+        result = buildTSRequest(version=2, pubKeyAuth=pubKeyAuth)
+        self.assertEqual(result[0], 0x30)
+        self.assertIn(pubKeyAuth, result)
+
+    def test_buildTSRequest_with_clientNonce(self):
+        nonce = os.urandom(32)
+        result = buildTSRequest(version=5, clientNonce=nonce)
+        self.assertEqual(result[0], 0x30)
+        self.assertIn(nonce, result)
+
+    def test_buildTSRequest_full(self):
+        """Build a TSRequest with negoTokens + pubKeyAuth + clientNonce."""
+        negoTokens = b"NTLMSSP\x00" + b"\x03\x00\x00\x00" + b"\x00" * 60
+        pubKeyAuth = os.urandom(48)
+        nonce = os.urandom(32)
+        result = buildTSRequest(version=5, negoTokens=negoTokens, pubKeyAuth=pubKeyAuth, clientNonce=nonce)
+        self.assertEqual(result[0], 0x30)
+        self.assertIn(b"NTLMSSP\x00", result)
+        self.assertIn(pubKeyAuth, result)
+        self.assertIn(nonce, result)
+
+    def test_buildTSCredentials(self):
+        result = buildTSCredentials("CONTOSO", "admin", "P@ssw0rd")
+        self.assertEqual(result[0], 0x30)
+        # Should contain UTF-16LE encoded strings
+        self.assertIn("CONTOSO".encode('utf-16-le'), result)
+        self.assertIn("admin".encode('utf-16-le'), result)
+        self.assertIn("P@ssw0rd".encode('utf-16-le'), result)
+
+
 if __name__ == "__main__":
     unittest.main()
