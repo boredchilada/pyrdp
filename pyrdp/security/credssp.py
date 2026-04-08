@@ -99,18 +99,28 @@ def computeSealKey(exportedKey: bytes, clientToServer: bool = True) -> bytes:
 
 def gssWrapEx(signKey: bytes, sealKey: bytes, seqNum: int, message: bytes) -> bytes:
     """
-    GSS_WrapEx: sign and encrypt a message per MS-NLMP 3.4.4.
+    GSS_WrapEx: sign and encrypt a message per MS-NLMP 3.4.4.2
+    (with NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY).
+
+    Per-message re-keying: SealingKey = MD5(SealKey || SeqNum)
+    The SAME RC4 state encrypts the message AND the checksum.
+
     Output: Version(4) + Checksum(8) + SeqNum(4) + EncryptedMessage
     """
     seqNumBytes = struct.pack('<I', seqNum)
 
-    cipher = ARC4.new(sealKey)
+    # Per-message re-keying (MS-NLMP 3.4.4.2)
+    sealingKey = hashlib.md5(sealKey + seqNumBytes).digest()
+    cipher = ARC4.new(sealingKey)
+
+    # Encrypt the message
     encryptedMessage = cipher.encrypt(message)
 
+    # Compute checksum: HMAC_MD5(SignKey, SeqNum || Message)[:8]
     checksum = _hmacMd5(signKey, seqNumBytes + message)[:8]
 
-    cipher2 = ARC4.new(sealKey)
-    encryptedChecksum = cipher2.encrypt(checksum)
+    # Encrypt the checksum with the SAME RC4 state (continues from message encryption)
+    encryptedChecksum = cipher.encrypt(checksum)
 
     version = struct.pack('<I', 1)
 
