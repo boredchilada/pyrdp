@@ -71,35 +71,44 @@ class SecurityMITM:
         if pdu.extraInfo:
             clientAddress = decodeUTF16LE(pdu.extraInfo.clientAddress)
 
-        self.log.info("Client Info: username = %(username)r, password = %(password)r, domain = %(domain)r, clientAddress = %(clientAddress)r", {
-            "username": pdu.username,
-            "password": pdu.password,
-            "domain": pdu.domain,
-            "clientAddress": clientAddress
+        # Strip null bytes for clean display
+        cleanUser = pdu.username.strip("\x00") if pdu.username else ""
+        cleanPass = pdu.password.strip("\x00") if pdu.password else ""
+        cleanDomain = pdu.domain.strip("\x00") if pdu.domain else ""
+        cleanAddr = clientAddress.strip("\x00") if clientAddress else ""
+
+        self.log.info("Client Info: username=%(username)r password=%(password)r domain=%(domain)r clientAddress=%(clientAddress)r", {
+            "username": cleanUser,
+            "password": cleanPass,
+            "domain": cleanDomain,
+            "clientAddress": cleanAddr,
         })
 
         # Log extra client info for fingerprinting
         if pdu.extraInfo:
-            clientDir = decodeUTF16LE(pdu.extraInfo.clientDir) if pdu.extraInfo.clientDir else ""
+            clientDir = decodeUTF16LE(pdu.extraInfo.clientDir).strip("\x00") if pdu.extraInfo.clientDir else ""
             self.log.info("Client extra: dir=%(clientDir)r perfFlags=%(perfFlags)s shell=%(shell)r", {
                 "clientDir": clientDir,
                 "perfFlags": pdu.extraInfo.performanceFlags,
-                "shell": pdu.alternateShell,
+                "shell": cleanShell,
             })
 
-        # Store in state for fleet event logging
+        # Store in state for fleet event logging (null bytes stripped)
+        cleanShell = pdu.alternateShell.strip("\x00") if pdu.alternateShell else ""
+        cleanWorkDir = pdu.workingDir.strip("\x00") if pdu.workingDir else ""
+
         self.state.clientInfo = {
-            "domain": pdu.domain,
-            "username": pdu.username,
-            "client_address": clientAddress or "",
-            "alternate_shell": pdu.alternateShell or "",
-            "working_dir": pdu.workingDir or "",
+            "domain": cleanDomain,
+            "username": cleanUser,
+            "client_address": cleanAddr,
+            "alternate_shell": cleanShell,
+            "working_dir": cleanWorkDir,
             "code_page": pdu.codePage,
             "info_flags": pdu.flags,
         }
         if pdu.extraInfo:
             if pdu.extraInfo.clientDir:
-                self.state.clientInfo["client_dir"] = decodeUTF16LE(pdu.extraInfo.clientDir)
+                self.state.clientInfo["client_dir"] = decodeUTF16LE(pdu.extraInfo.clientDir).strip("\x00")
             if pdu.extraInfo.performanceFlags is not None:
                 self.state.clientInfo["performance_flags"] = pdu.extraInfo.performanceFlags
             if pdu.extraInfo.clientSessionID is not None:
@@ -114,14 +123,14 @@ class SecurityMITM:
             if pdu.extraInfo.dynamicDaylightTimeDisabled is not None:
                 self.state.clientInfo["dst_disabled"] = bool(pdu.extraInfo.dynamicDaylightTimeDisabled)
 
-        self.state.capturedUsername = pdu.username
-        self.state.capturedPassword = pdu.password
+        self.state.capturedUsername = cleanUser
+        self.state.capturedPassword = cleanPass
 
         authMethod = "NLA/CredSSP" if self.state.serverRequiresNLA else "TLS"
         self.log.info("[+] Session authenticated (%(method)s): user=%(user)r domain=%(domain)r", {
             "method": authMethod,
-            "user": pdu.username,
-            "domain": pdu.domain,
+            "user": cleanUser,
+            "domain": cleanDomain,
         })
 
         # Fleet event: login_success (credentials captured and forwarded)
@@ -129,9 +138,9 @@ class SecurityMITM:
             "event_type": "login_success",
             "src_ip": self.state.clientIp or "",
             "src_port": self.state.clientPort or 0,
-            "username": pdu.username,
-            "password": pdu.password,
-            "password_length": len(pdu.password) if pdu.password else 0,
+            "username": cleanUser,
+            "password": cleanPass,
+            "password_length": len(cleanPass),
             "rdp": self.state.rdpFingerprint,
             "client_info": self.state.clientInfo,
         })
