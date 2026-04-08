@@ -66,5 +66,48 @@ class TestNTLMComputation(unittest.TestCase):
         self.assertNotEqual(sealKey, sealKey2)
 
 
+from pyrdp.security.credssp import gssWrapEx, computePubKeyAuth
+
+
+class TestGSSWrapEx(unittest.TestCase):
+    def test_output_format(self):
+        signKey = os.urandom(16)
+        sealKey = os.urandom(16)
+        message = b"test message"
+
+        result = gssWrapEx(signKey, sealKey, 0, message)
+
+        # Version(4) + Checksum(8) + SeqNum(4) + EncryptedMessage
+        self.assertEqual(result[:4], b'\x01\x00\x00\x00')
+        self.assertEqual(len(result), 4 + 8 + 4 + len(message))
+
+    def test_seqnum_encoded(self):
+        signKey = os.urandom(16)
+        sealKey = os.urandom(16)
+        message = b"test"
+
+        result = gssWrapEx(signKey, sealKey, 42, message)
+        seqNum = struct.unpack('<I', result[12:16])[0]
+        self.assertEqual(seqNum, 42)
+
+    def test_computePubKeyAuth_v2(self):
+        exportedKey = os.urandom(16)
+        serverPubKey = os.urandom(256)
+        result = computePubKeyAuth(exportedKey, serverPubKey, version=2)
+        # Version(4) + Checksum(8) + SeqNum(4) + encrypted(serverPubKey=256)
+        self.assertEqual(len(result), 4 + 8 + 4 + 256)
+
+    def test_computePubKeyAuth_v5(self):
+        exportedKey = os.urandom(16)
+        serverPubKey = os.urandom(256)
+        nonce = os.urandom(32)
+        result = computePubKeyAuth(exportedKey, serverPubKey, version=5, nonce=nonce)
+        # Version(4) + Checksum(8) + SeqNum(4) + encrypted(SHA256=32)
+        self.assertEqual(len(result), 4 + 8 + 4 + 32)
+
+
+import struct
+
+
 if __name__ == "__main__":
     unittest.main()
