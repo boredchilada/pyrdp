@@ -35,16 +35,23 @@ echo pyrdp-player read a replay in headless mode test
 ${ENTRYPOINT["player",${SOURCE}]} --headless test/files/test_session.replay
 echo
 
-echo ===================================================
-echo pyrdp-convert to MP4
-${ENTRYPOINT["convert",${SOURCE}]} test/files/test_convert.pyrdp -f mp4
-echo
+# MP4 conversion requires the 'av' package (full install with ffmpeg)
+if python -c "import av" 2>/dev/null; then
+	echo ===================================================
+	echo pyrdp-convert to MP4
+	${ENTRYPOINT["convert",${SOURCE}]} test/files/test_convert.pyrdp -f mp4
+	echo
 
-echo ===================================================
-echo Verify the MP4 file
-file test_convert.mp4 | grep "MP4 Base Media"
-rm test_convert.mp4
-echo
+	echo ===================================================
+	echo Verify the MP4 file
+	file test_convert.mp4 | grep "MP4 Base Media"
+	rm test_convert.mp4
+	echo
+else
+	echo ===================================================
+	echo "SKIP: pyrdp-convert to MP4 (av package not installed)"
+	echo
+fi
 
 echo ===================================================
 echo pyrdp-convert replay to JSON
@@ -78,13 +85,19 @@ echo Verify that the replay file exists
 file -E "20200319000716_192.168.38.1:20989-192.168.38.1:3389.pyrdp"
 rm "20200319000716_192.168.38.1:20989-192.168.38.1:3389.pyrdp"
 
-echo ===================================================
-echo pyrdp-convert.py regression issue 428
-${ENTRYPOINT["convert",${SOURCE}]} test/files/test_convert_428.pyrdp -f mp4
-echo
+if python -c "import av" 2>/dev/null; then
+	echo ===================================================
+	echo pyrdp-convert.py regression issue 428
+	${ENTRYPOINT["convert",${SOURCE}]} test/files/test_convert_428.pyrdp -f mp4
+	echo
 
-echo ===================================================
-echo Verify the MP4 file
-file test_convert_428.mp4 | grep "MP4 Base Media"
-rm test_convert_428.mp4
-echo
+	echo ===================================================
+	echo Verify the MP4 file
+	file test_convert_428.mp4 | grep "MP4 Base Media"
+	rm test_convert_428.mp4
+	echo
+else
+	echo ===================================================
+	echo "SKIP: pyrdp-convert regression 428 MP4 (av package not installed)"
+	echo
+fi
