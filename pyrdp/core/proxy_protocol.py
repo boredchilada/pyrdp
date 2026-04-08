@@ -85,5 +85,57 @@ def parseProxyProtocol(data: bytes) -> ProxyProtocolHeader:
 
 
 def parseV2(data: bytes) -> ProxyProtocolHeader:
-    """Parse a PROXY protocol v2 (binary) header. Placeholder — implemented in Task 2."""
-    raise NotImplementedError("v2 parsing not yet implemented")
+    """Parse a PROXY protocol v2 (binary) header."""
+    if len(data) < 16:
+        raise ValueError(f"PROXY v2 header too short: {len(data)} bytes (need at least 16)")
+
+    verCmd = data[12]
+    version = (verCmd >> 4) & 0x0F
+    command = verCmd & 0x0F
+
+    if version != 0x02:
+        raise ValueError(f"Unsupported PROXY v2 version: {version}")
+
+    famProto = data[13]
+    addrFamily = (famProto >> 4) & 0x0F
+    transport = famProto & 0x0F
+
+    addrLen = struct.unpack('!H', data[14:16])[0]
+
+    if len(data) < 16 + addrLen:
+        raise ValueError(f"PROXY v2 header truncated: need {16 + addrLen} bytes, got {len(data)}")
+
+    rawLength = 16 + addrLen
+    addrData = data[16:rawLength]
+
+    commandStr = "PROXY" if command == 0x01 else "LOCAL"
+
+    if command == 0x00 or addrFamily == 0x00:
+        return ProxyProtocolHeader(
+            srcAddr=None, srcPort=None, dstAddr=None, dstPort=None,
+            family="AF_UNSPEC", command=commandStr, rawLength=rawLength
+        )
+
+    if addrFamily == 0x01 and transport == 0x01:
+        if len(addrData) < 12:
+            raise ValueError(f"PROXY v2 IPv4 address data too short: {len(addrData)}")
+        import socket
+        srcAddr = socket.inet_ntoa(addrData[0:4])
+        dstAddr = socket.inet_ntoa(addrData[4:8])
+        srcPort, dstPort = struct.unpack('!HH', addrData[8:12])
+        family = "AF_INET"
+    elif addrFamily == 0x02 and transport == 0x01:
+        if len(addrData) < 36:
+            raise ValueError(f"PROXY v2 IPv6 address data too short: {len(addrData)}")
+        import socket
+        srcAddr = socket.inet_ntop(socket.AF_INET6, addrData[0:16])
+        dstAddr = socket.inet_ntop(socket.AF_INET6, addrData[16:32])
+        srcPort, dstPort = struct.unpack('!HH', addrData[32:36])
+        family = "AF_INET6"
+    else:
+        raise ValueError(f"Unsupported PROXY v2 family/transport: 0x{famProto:02X}")
+
+    return ProxyProtocolHeader(
+        srcAddr=srcAddr, srcPort=srcPort, dstAddr=dstAddr, dstPort=dstPort,
+        family=family, command=commandStr, rawLength=rawLength
+    )
