@@ -148,7 +148,28 @@ class TestSPNEGO(unittest.TestCase):
         self.assertIn(responseToken, result)
 
 
-from pyrdp.security.credssp import buildTSRequest, buildTSCredentials
+from pyrdp.security.credssp import buildTSRequest, buildTSCredentials, parseTSRequestVersion
+
+
+class TestParseTSRequestVersion(unittest.TestCase):
+    def test_parses_version_from_real_tsrequest(self):
+        """Build a TSRequest with version=6, then parse it back."""
+        tsReq = buildTSRequest(version=6)
+        self.assertEqual(parseTSRequestVersion(tsReq), 6)
+
+    def test_parses_version_2(self):
+        tsReq = buildTSRequest(version=2)
+        self.assertEqual(parseTSRequestVersion(tsReq), 2)
+
+    def test_parses_version_5_with_nonce(self):
+        tsReq = buildTSRequest(version=5, clientNonce=os.urandom(32))
+        self.assertEqual(parseTSRequestVersion(tsReq), 5)
+
+    def test_fallback_on_garbage(self):
+        self.assertEqual(parseTSRequestVersion(b'\xff\x00'), 2)
+
+    def test_fallback_on_empty(self):
+        self.assertEqual(parseTSRequestVersion(b''), 2)
 
 
 class TestTSRequest(unittest.TestCase):

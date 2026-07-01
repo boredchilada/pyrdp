@@ -88,7 +88,9 @@ class CertificateCache():
     def lookup(self, cert: OpenSSL.crypto.X509) -> Tuple[str, str]:
         subject = cert.get_subject()
         parts = dict(subject.get_components())
-        commonName = parts[b'CN'].decode()
+        commonName = parts.get(b'CN', b'unknown').decode()
+        # Sanitize CN for filesystem safety
+        commonName = commonName.replace('/', '_').replace('\\', '_').replace('\x00', '').replace('..', '_')
         base = str(self._root / commonName)
 
         if path.exists(base + '.pem'):

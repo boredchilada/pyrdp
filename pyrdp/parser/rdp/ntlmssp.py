@@ -53,7 +53,27 @@ class NTLMSSPParser(Parser):
             return b""
 
     def parseNTLMSSPNegotiate(self, data: bytes, stream: BytesIO) -> NTLMSSPNegotiatePDU:
-        return NTLMSSPNegotiatePDU()
+        negotiateFlags = 0
+        domainName = ""
+        workstation = ""
+        version = b""
+        try:
+            negotiateFlags = Uint32LE.unpack(stream)
+            domainNameFields = stream.read(8)
+            workstationFields = stream.read(8)
+            if negotiateFlags & 0x02000000:  # NTLMSSP_NEGOTIATE_VERSION
+                version = stream.read(8)
+            if domainNameFields:
+                raw = self.parseField(data, domainNameFields)
+                if raw:
+                    domainName = raw.decode("utf-16le", errors="replace")
+            if workstationFields:
+                raw = self.parseField(data, workstationFields)
+                if raw:
+                    workstation = raw.decode("utf-16le", errors="replace")
+        except Exception:
+            pass
+        return NTLMSSPNegotiatePDU(negotiateFlags, domainName, workstation, version)
 
     def parseNTLMSSPChallenge(self, data: bytes, stream: BytesIO) -> NTLMSSPChallengePDU:
         workstationLen = Uint16LE.unpack(stream)
@@ -133,38 +153,72 @@ class NTLMSSPParser(Parser):
         workstation = stream.read(workstationLen)
         return NTLMSSPChallengePayloadPDU(workstation)
 
-    def writeNTLMSSPChallenge(self, workstation: str, serverChallenge: bytes) -> bytes:
+    def writeNTLMSSPChallenge(self, workstation: str, serverChallenge: bytes,
+                              nbDomain: str = None, nbComputer: str = None,
+                              dnsDomain: str = None, dnsComputer: str = None,
+                              dnsTree: str = None) -> bytes:
+        import struct, time
+        if nbDomain is None:
+            nbDomain = workstation
+        if nbComputer is None:
+            nbComputer = workstation
+        if dnsDomain is None:
+            dnsDomain = workstation.lower()
+        if dnsComputer is None:
+            dnsComputer = f"{workstation.lower()}.{dnsDomain}"
+        if dnsTree is None:
+            dnsTree = dnsDomain
+
+        targetName = nbDomain.encode('utf-16le')
+        targetNameLen = len(targetName)
+
+        avPairs = bytearray()
+        for avId, avValue in [
+            (0x0002, nbDomain),       # MsvAvNbDomainName
+            (0x0001, nbComputer),     # MsvAvNbComputerName
+            (0x0004, dnsDomain),      # MsvAvDnsDomainName
+            (0x0003, dnsComputer),    # MsvAvDnsComputerName
+            (0x0005, dnsTree),        # MsvAvDnsTreeName
+        ]:
+            encoded = avValue.encode('utf-16le')
+            avPairs.extend(struct.pack('<HH', avId, len(encoded)))
+            avPairs.extend(encoded)
+        # MsvAvTimestamp (0x0007) — Windows FILETIME
+        epoch_diff = 116444736000000000
+        filetime = int(time.time() * 10000000) + epoch_diff
+        avPairs.extend(struct.pack('<HH', 0x0007, 8))
+        avPairs.extend(struct.pack('<Q', filetime))
+        # MsvAvEOL
+        avPairs.extend(struct.pack('<HH', 0x0000, 0))
+        pairsLen = len(avPairs)
+
+        fixedLen = 56  # CHALLENGE_MESSAGE fixed header
+        targetNameOffset = fixedLen
+        targetInfoOffset = fixedLen + targetNameLen
+
+        msg = bytearray(fixedLen + targetNameLen + pairsLen)
+        msg[0:8] = b'NTLMSSP\x00'
+        struct.pack_into('<I', msg, 8, NTLMSSPMessageType.CHALLENGE_MESSAGE)
+        struct.pack_into('<HHI', msg, 12, targetNameLen, targetNameLen, targetNameOffset)
+        # Realistic negotiate flags matching rdp-proxy Go code
+        flags = (0x00000001 | 0x00000200 | 0x00020000 | 0x00800000 |
+                 0x02000000 | 0x20000000 | 0x80000000 | 0x00080000 |
+                 0x00008000 | 0x00000010 | 0x40000000)
+        struct.pack_into('<I', msg, 20, flags)
+        msg[24:32] = serverChallenge
+        # Reserved 8 bytes at offset 32 (already zero)
+        struct.pack_into('<HHI', msg, 40, pairsLen, pairsLen, targetInfoOffset)
+        # Version
+        msg[48] = NTLMSSPChallengeVersion.NEG_PROD_MAJOR_VERSION_HIGH
+        msg[49] = NTLMSSPChallengeVersion.NEG_PROD_MINOR_VERSION_LOW
+        struct.pack_into('<H', msg, 50, NTLMSSPChallengeVersion.NEG_PROD_VERSION_BUILT)
+        msg[55] = NTLMSSPChallengeVersion.NEG_NTLM_REVISION_CURRENT
+
+        msg[targetNameOffset:targetNameOffset + targetNameLen] = targetName
+        msg[targetInfoOffset:targetInfoOffset + pairsLen] = avPairs
+
         stream = BytesIO()
-        substream = BytesIO()
-
-        workstation = workstation.encode('utf-16le')
-        nameLen = len(workstation)
-        pairsLen = self.writeNTLMSSPChallengePayload(substream, workstation)
-
-        """
-        CHALLENGE_MESSAGE structure
-        https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/801a4681-8809-4be9-ab0d-61dcfe762786
-        """
-        substream.write(b'NTLMSSP\x00')
-        Uint32LE.pack(NTLMSSPMessageType.CHALLENGE_MESSAGE, substream)
-        Uint16LE.pack(nameLen, substream)
-        Uint16LE.pack(nameLen, substream)
-        Uint32LE.pack(NTLMSSPChallengeType.WORKSTATION_BUFFER_OFFSET, substream)
-        Uint32LE.pack(NTLMSSPChallengeType.NEGOTIATE_FLAGS, substream)
-        substream.write(serverChallenge)
-        Uint64LE.pack(0, substream)
-        Uint16LE.pack(pairsLen, substream)
-        Uint16LE.pack(pairsLen, substream)
-        Uint32LE.pack(NTLMSSPChallengeType.WORKSTATION_BUFFER_OFFSET + nameLen, substream)
-        Uint8.pack(NTLMSSPChallengeVersion.NEG_PROD_MAJOR_VERSION_HIGH, substream)
-        Uint8.pack(NTLMSSPChallengeVersion.NEG_PROD_MINOR_VERSION_LOW, substream)
-        Uint16LE.pack(NTLMSSPChallengeVersion.NEG_PROD_VERSION_BUILT, substream)
-        Uint8.pack(0, substream)
-        Uint8.pack(0, substream)
-        Uint8.pack(0, substream)
-        Uint8.pack(NTLMSSPChallengeVersion.NEG_NTLM_REVISION_CURRENT, substream)
-
-        self.writeNTLMSSPTSRequest(stream, NTLMSSPChallengeVersion.CREDSSP_VERSION, substream.getvalue())
+        self.writeNTLMSSPTSRequest(stream, NTLMSSPChallengeVersion.CREDSSP_VERSION, bytes(msg))
         return stream.getvalue()
 
     def writeNTLMSSPTSRequest(self, stream: BytesIO, version: int, negoTokens: bytes):
@@ -214,37 +268,5 @@ class NTLMSSPParser(Parser):
 
         return stream.getvalue()
 
-    def writeNTLMSSPChallengePayload(self, stream: BytesIO, workstation: str) -> int:
-        """
-        Write CHALLENGE message payload and AV_PAIRS
-        https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/801a4681-8809-4be9-ab0d-61dcfe762786
-        https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/83f5e789-660d-4781-8491-5f8c6641f75e
-        """
-        length = len(workstation)
-
-        stream.seek(NTLMSSPChallengeType.WORKSTATION_BUFFER_OFFSET)
-        stream.write(workstation)
-
-        pairsLen = stream.tell()
-        Uint16LE.pack(NTLMSSPChallengeType.NTLMSSP_NTLM_CHALLENGE_AV_PAIRS_ID, stream)
-        Uint16LE.pack(length, stream)
-        stream.write(workstation)
-        Uint16LE.pack(NTLMSSPChallengeType.NTLMSSP_NTLM_CHALLENGE_AV_PAIRS1_ID, stream)
-        Uint16LE.pack(length, stream)
-        stream.write(workstation)
-        Uint16LE.pack(NTLMSSPChallengeType.NTLMSSP_NTLM_CHALLENGE_AV_PAIRS2_ID, stream)
-        Uint16LE.pack(length, stream)
-        stream.write(workstation)
-        Uint16LE.pack(NTLMSSPChallengeType.NTLMSSP_NTLM_CHALLENGE_AV_PAIRS3_ID, stream)
-        Uint16LE.pack(length, stream)
-        stream.write(workstation)
-        Uint16LE.pack(NTLMSSPChallengeType.NTLMSSP_NTLM_CHALLENGE_AV_PAIRS5_ID, stream)
-        Uint16LE.pack(length, stream)
-        stream.write(workstation)
-        Uint16LE.pack(NTLMSSPChallengeType.NTLMSSP_NTLM_CHALLENGE_AV_PAIRS6_ID, stream)
-        Uint16LE.pack(0, stream)
-        pairsLen = stream.tell() - pairsLen
-        stream.seek(0)
-
-        return pairsLen
+    # writeNTLMSSPChallengePayload removed — AV_PAIRs now built inline in writeNTLMSSPChallenge
 

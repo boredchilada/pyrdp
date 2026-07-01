@@ -94,7 +94,9 @@ class PassiveClipboardStealer:
         # Handle file transfers
         if type(pdu) in self.dispatch:
             forward = self.dispatch[type(pdu)](pdu)
-        assert forward is not None, "ClipboardMITM: PDU handler must return True or False!"
+        if forward is None:
+            self.log.warning("ClipboardMITM: PDU handler returned None, defaulting to forward")
+            forward = True
 
         if forward:
             destination.sendPDU(pdu)

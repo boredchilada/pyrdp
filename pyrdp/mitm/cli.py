@@ -141,6 +141,15 @@ def buildArgParser():
              "disconnect cleanly. Do not attempt credential-replay CredSSP. "
              "Use this if you only need hashes, not full sessions.",
         action="store_true")
+    parser.add_argument("--ntlm-hostname",
+        help="NetBIOS hostname for NTLM challenge (default: random DESKTOP-XXXXXXX)",
+        default=None)
+    parser.add_argument("--ntlm-domain",
+        help="NetBIOS domain for NTLM challenge (default: same as hostname)",
+        default=None)
+    parser.add_argument("--ntlm-dns-domain",
+        help="DNS domain for NTLM challenge TargetInfo (default: <domain>.local)",
+        default=None)
 
     return parser
 
@@ -225,6 +234,9 @@ def configure(cmdline=None) -> MITMConfig:
     config.sspChallenge = args.ssp_challenge
     config.proxyProtocol = args.proxy_protocol
     config.nlaFallback = args.nla_fallback
+    config.ntlmHostname = args.ntlm_hostname
+    config.ntlmDomain = args.ntlm_domain
+    config.ntlmDnsDomain = args.ntlm_dns_domain
 
     payload = None
     powershell = None
@@ -305,8 +317,15 @@ def configure(cmdline=None) -> MITMConfig:
         if auth == "tls":
             config.authMethods |= NegotiationProtocols.SSL
         elif auth == "ssp":
-            # CredSSP implies TLS.
-            config.authMethods |= (NegotiationProtocols.SSL | NegotiationProtocols.CRED_SSP)
+            # CredSSP implies TLS. EARLY_USER_AUTHORIZATION_RESULT is the
+            # HYBRID_EX flavour of CredSSP (v6+, default on Win11 24H2 /
+            # Server 2025): after CredSSP the server sends a 4-byte
+            # authorization result before MCS begins.
+            config.authMethods |= (
+                NegotiationProtocols.SSL
+                | NegotiationProtocols.CRED_SSP
+                | NegotiationProtocols.EARLY_USER_AUTHORIZATION_RESULT
+            )
 
     showConfiguration(config)
     return config

@@ -80,6 +80,14 @@ class BasePathMITM:
             self._flushDelayed.cancel()
         self._flushDelayed = reactor.callLater(KEYSTROKE_FLUSH_TIMEOUT, self._flushPostLoginBuffer, "idle")
 
+    def cleanup(self):
+        """Cancel pending delayed calls and flush remaining buffer. Call on disconnect."""
+        if self._flushDelayed and self._flushDelayed.active():
+            self._flushDelayed.cancel()
+            self._flushDelayed = None
+        if self._postLoginBuffer:
+            self._flushPostLoginBuffer("disconnect")
+
     def _appendPostLogin(self, text: str):
         """Append text to post-login buffer and schedule/trigger flush."""
         self._postLoginBuffer += text

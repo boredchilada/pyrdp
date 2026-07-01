@@ -79,7 +79,6 @@ class MCSMITM:
         the client data.
         :param pdu: the connect initial PDU
         """
-
         gccParser = GCCParser()
         rdpClientConnectionParser = ClientConnectionParser()
         gccConferenceCreateRequestPDU: GCCConferenceCreateRequestPDU = gccParser.parse(pdu.payload)
@@ -173,23 +172,52 @@ class MCSMITM:
             "rdp_version": str(coreData.version),
             "server_selected_protocol": str(coreData.serverSelectedProtocol) if coreData.serverSelectedProtocol else "",
         }
-        # Optional fields — only include if present
-        if coreData.clientDigProductId:
-            self.state.rdpFingerprint["client_dig_product_id"] = coreData.clientDigProductId.strip("\x00")
-        if coreData.serialNumber:
-            self.state.rdpFingerprint["serial_number"] = coreData.serialNumber
-        if coreData.desktopPhysicalWidth:
-            self.state.rdpFingerprint["desktop_physical_width"] = coreData.desktopPhysicalWidth
-            self.state.rdpFingerprint["desktop_physical_height"] = coreData.desktopPhysicalHeight
-        if coreData.desktopScaleFactor:
-            self.state.rdpFingerprint["desktop_scale_factor"] = coreData.desktopScaleFactor
-        if coreData.deviceScaleFactor:
-            self.state.rdpFingerprint["device_scale_factor"] = coreData.deviceScaleFactor
-        if coreData.earlyCapabilityFlags:
-            self.state.rdpFingerprint["early_capability_flags"] = int(coreData.earlyCapabilityFlags)
-        if coreData.desktopOrientation:
-            self.state.rdpFingerprint["desktop_orientation"] = str(coreData.desktopOrientation)
+        try:
+            # IME filename — reveals CJK input method / specific keyboard driver
+            if hasattr(coreData, 'imeFileName') and coreData.imeFileName:
+                rawIme = coreData.imeFileName
+                if isinstance(rawIme, bytes):
+                    imeName = rawIme.strip(b"\x00").decode("utf-16-le", errors="replace").strip("\x00")
+                else:
+                    imeName = rawIme.strip("\x00")
+                if imeName:
+                    self.state.rdpFingerprint["ime_filename"] = imeName
+                    self.log.info("Client IME: %(ime)s", {"ime": imeName})
 
+            # Channel combination fingerprinting
+            if channels:
+                channelSig = ",".join(sorted(channels))
+                self.state.rdpFingerprint["channel_signature"] = channelSig
+                if "cliprdr" not in [c.lower() for c in channels]:
+                    self.state.rdpFingerprint["channel_anomaly"] = "no_clipboard"
+        except Exception as e:
+            self.log.warning("Fingerprint enrichment error: %(err)s", {"err": str(e)})
+
+        # Optional fields — only include if present
+        try:
+            if coreData.clientDigProductId:
+                rawPid = coreData.clientDigProductId
+                if isinstance(rawPid, bytes):
+                    self.state.rdpFingerprint["client_dig_product_id"] = rawPid.strip(b"\x00").decode("utf-16-le", errors="replace").strip("\x00")
+                else:
+                    self.state.rdpFingerprint["client_dig_product_id"] = rawPid.strip("\x00")
+            if coreData.serialNumber:
+                self.state.rdpFingerprint["serial_number"] = coreData.serialNumber
+            if coreData.desktopPhysicalWidth:
+                self.state.rdpFingerprint["desktop_physical_width"] = coreData.desktopPhysicalWidth
+                self.state.rdpFingerprint["desktop_physical_height"] = coreData.desktopPhysicalHeight
+            if coreData.desktopScaleFactor:
+                self.state.rdpFingerprint["desktop_scale_factor"] = coreData.desktopScaleFactor
+            if coreData.deviceScaleFactor:
+                self.state.rdpFingerprint["device_scale_factor"] = coreData.deviceScaleFactor
+            if coreData.earlyCapabilityFlags:
+                self.state.rdpFingerprint["early_capability_flags"] = int(coreData.earlyCapabilityFlags)
+            if coreData.desktopOrientation:
+                self.state.rdpFingerprint["desktop_orientation"] = str(coreData.desktopOrientation)
+        except Exception as e:
+            self.log.warning("Optional fingerprint field error: %(err)s", {"err": str(e)})
+
+        self.log.debug("MCS Connect Initial forwarding to server")
         self.server.sendPDU(serverMCSPDU)
 
     def onConnectResponse(self, pdu: MCSConnectResponsePDU):
@@ -197,6 +225,7 @@ class MCSMITM:
         Parse server connection information. Initialize security settings and map channel IDs to channel names.
         :param pdu: the connect response PDU
         """
+        self.log.debug("MCS Connect Response received (result=%(result)d)", {"result": pdu.result})
 
         if pdu.result != 0:
             self.client.sendPDU(pdu)
@@ -247,11 +276,25 @@ class MCSMITM:
             # The clientRequestedProtocols field MUST be the same as the one received in the X224 Connection Request
             serverData.coreData.clientRequestedProtocols = self.state.requestedProtocols
 
+            # Strip SKIP_CHANNELJOIN_SUPPORTED (0x08) from server earlyCapabilityFlags.
+            # Server 2025+ sets this flag, telling the client it can skip Channel Join
+            # Requests. But PyRDP's MITM infrastructure needs Channel Join Confirms
+            # to build the IO/clipboard/device channels. Without them, all client data
+            # on those channels gets silently dropped.
+            self.state._skipChannelJoinStripped = False
+            if hasattr(serverData.coreData, 'earlyCapabilityFlags') and serverData.coreData.earlyCapabilityFlags is not None:
+                if serverData.coreData.earlyCapabilityFlags & 0x08:
+                    self.log.info("Stripping SKIP_CHANNELJOIN_SUPPORTED flag from server (was 0x%(flags)02x)",
+                                  {"flags": serverData.coreData.earlyCapabilityFlags})
+                    serverData.coreData.earlyCapabilityFlags &= ~0x08
+                    self.state._skipChannelJoinStripped = True
+
             modifiedServerData = ServerDataPDU(serverData.coreData, security, serverData.networkData)
             modifiedGCCPDU = GCCConferenceCreateResponsePDU(gccPDU.nodeID, gccPDU.tag, gccPDU.result, rdpParser.write(modifiedServerData))
             modifiedMCSPDU = MCSConnectResponsePDU(pdu.result, pdu.calledConnectID, pdu.domainParams, gccParser.write(modifiedGCCPDU))
 
             self.client.sendPDU(modifiedMCSPDU)
+
 
     def onErectDomainRequest(self, pdu: MCSErectDomainRequestPDU):
         """
@@ -268,24 +311,21 @@ class MCSMITM:
         self.server.sendPDU(pdu)
 
     def onAttachUserConfirm(self, pdu: MCSAttachUserConfirmPDU):
-        """
-        Forward an attach user confirm to the client.
-        :param pdu: the attach user confirm
-        """
         self.client.sendPDU(pdu)
 
     def onChannelJoinRequest(self, pdu: MCSChannelJoinRequestPDU):
-        """
-        Forward a channel join request to the server.
-        :param pdu: the channel join request
-        """
+        self.log.debug("Channel Join Request: channel=%(ch)d", {"ch": pdu.channelID})
+        if self.state._skipChannelJoinStripped:
+            # DC has SKIP_CHANNELJOIN set — it won't process join requests.
+            # Respond to the client ourselves and build channels locally.
+            self.log.debug("Responding with synthetic Channel Join Confirm for %(ch)d", {"ch": pdu.channelID})
+            confirm = MCSChannelJoinConfirmPDU(0, pdu.initiator, pdu.channelID, pdu.channelID, b"")
+            self.onChannelJoinConfirm(confirm)
+            return
         self.server.sendPDU(pdu)
 
     def onChannelJoinConfirm(self, pdu: MCSChannelJoinConfirmPDU):
-        """
-        If the channel join was successful, build a client and a server MCS channel and call the callback.
-        :param pdu: the confirmation PDU
-        """
+        self.log.debug("Channel Join Confirm: channel=%(ch)d result=%(r)d", {"ch": pdu.channelID, "r": pdu.result})
 
         if pdu.result == 0:
             clientChannel = MCSServerChannel(self.client, pdu.initiator, pdu.channelID)
@@ -297,16 +337,14 @@ class MCSMITM:
         self.client.sendPDU(pdu)
 
     def onSendDataRequest(self, pdu: MCSSendDataRequestPDU):
-        """
-        Forward a send data request to a server-side channel.
-        :param pdu: the send data request
-        """
-
         self.statCounter.increment(STAT.MCS, STAT.MCS_INPUT)
 
         if pdu.channelID in self.serverChannels:
             self.statCounter.increment(STAT.MCS_INPUT_ + str(pdu.channelID))
             self.clientChannels[pdu.channelID].recv(pdu.payload)
+        else:
+            self.log.warning("SendDataRequest on unknown channel %(ch)d — dropped",
+                             {"ch": pdu.channelID})
 
     def onSendDataIndication(self, pdu: MCSSendDataIndicationPDU):
         """

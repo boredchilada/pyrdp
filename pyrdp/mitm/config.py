@@ -97,6 +97,15 @@ class MITMConfig:
         self.nlaFallback: bool = False
         """When True, skip credential-replay CredSSP and only capture NTLM hash + disconnect cleanly."""
 
+        self.ntlmHostname: str = None
+        """NetBIOS hostname for NTLM challenge in hash-capture mode."""
+
+        self.ntlmDomain: str = None
+        """NetBIOS domain for NTLM challenge in hash-capture mode."""
+
+        self.ntlmDnsDomain: str = None
+        """DNS domain for NTLM challenge TargetInfo in hash-capture mode."""
+
     @property
     def replayDir(self) -> Path:
         """

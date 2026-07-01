@@ -104,15 +104,41 @@ class SecurityMITM:
             "code_page": pdu.codePage,
             "info_flags": pdu.flags,
         }
+
+        # Alert on alternateShell — almost always an attacker command
+        if cleanShell:
+            self.log.warning("alternateShell set (possible command injection): %(shell)r", {
+                "shell": cleanShell,
+            })
+            self.state.clientInfo["shell_suspicious"] = True
+
+        # Decode performance flags for behavioral fingerprint
         if pdu.extraInfo:
             if pdu.extraInfo.clientDir:
                 self.state.clientInfo["client_dir"] = decodeUTF16LE(pdu.extraInfo.clientDir).strip("\x00")
             if pdu.extraInfo.performanceFlags is not None:
-                self.state.clientInfo["performance_flags"] = pdu.extraInfo.performanceFlags
+                pf = pdu.extraInfo.performanceFlags
+                self.state.clientInfo["performance_flags"] = pf
+                self.state.clientInfo["performance_flags_decoded"] = {
+                    "disable_wallpaper": bool(pf & 0x01),
+                    "disable_full_window_drag": bool(pf & 0x02),
+                    "disable_menu_animations": bool(pf & 0x04),
+                    "disable_theming": bool(pf & 0x08),
+                    "disable_cursor_shadow": bool(pf & 0x20),
+                    "disable_cursor_settings": bool(pf & 0x40),
+                    "enable_font_smoothing": bool(pf & 0x80),
+                    "enable_desktop_composition": bool(pf & 0x100),
+                }
+                # All visual effects disabled = likely scripted tool
+                allDisabled = (pf & 0x6F) == 0x6F and not (pf & 0x180)
+                if allDisabled:
+                    self.state.clientInfo["scripted_connection"] = True
+                    self.log.info("Performance flags suggest scripted/automated connection (all visuals disabled)")
             if pdu.extraInfo.clientSessionID is not None:
                 self.state.clientInfo["client_session_id"] = pdu.extraInfo.clientSessionID
             if pdu.extraInfo.autoReconnectCookie is not None:
                 self.state.clientInfo["auto_reconnect"] = True
+                self.log.info("Auto-reconnect cookie present (attacker may be resuming prior session)")
             if pdu.extraInfo.dynamicDSTTimeZoneKeyName:
                 tzName = pdu.extraInfo.dynamicDSTTimeZoneKeyName
                 if isinstance(tzName, bytes):
@@ -120,6 +146,15 @@ class SecurityMITM:
                 self.state.clientInfo["timezone_name"] = tzName.strip("\x00")
             if pdu.extraInfo.dynamicDaylightTimeDisabled is not None:
                 self.state.clientInfo["dst_disabled"] = bool(pdu.extraInfo.dynamicDaylightTimeDisabled)
+            # Timezone bias for geolocation
+            if hasattr(pdu.extraInfo, 'clientTimeZone') and pdu.extraInfo.clientTimeZone:
+                tz = pdu.extraInfo.clientTimeZone
+                if hasattr(tz, 'bias'):
+                    self.state.clientInfo["timezone_bias_minutes"] = tz.bias
+                if hasattr(tz, 'standardBias'):
+                    self.state.clientInfo["timezone_standard_bias"] = tz.standardBias
+                if hasattr(tz, 'daylightBias'):
+                    self.state.clientInfo["timezone_daylight_bias"] = tz.daylightBias
 
         self.state.capturedUsername = cleanUser
         self.state.capturedPassword = cleanPass

@@ -17,8 +17,13 @@ class NTLMSSPPDU(PDU):
 
 
 class NTLMSSPNegotiatePDU(NTLMSSPPDU):
-    def __init__(self):
+    def __init__(self, negotiateFlags: int = 0, domainName: str = "",
+                 workstation: str = "", version: bytes = b""):
         super().__init__(NTLMSSPMessageType.NEGOTIATE_MESSAGE)
+        self.negotiateFlags = negotiateFlags
+        self.domainName = domainName
+        self.workstation = workstation
+        self.version = version
 
 
 class NTLMSSPChallengePDU(NTLMSSPPDU):

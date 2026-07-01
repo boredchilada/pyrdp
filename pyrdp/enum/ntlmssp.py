@@ -34,10 +34,55 @@ class NTLMSSPChallengeType(IntEnum):
 
 
 class NTLMSSPChallengeVersion(IntEnum):
-    CREDSSP_VERSION = 0x05
+    CREDSSP_VERSION = 0x06
 
     # https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/b1a6ceb2-f8ad-462b-b5af-f18527c48175
-    NEG_PROD_MAJOR_VERSION_HIGH = 0x06
-    NEG_PROD_MINOR_VERSION_LOW  = 0x02
-    NEG_PROD_VERSION_BUILT      = 0x0ECE
+    NEG_PROD_MAJOR_VERSION_HIGH = 0x0A       # Windows 10+
+    NEG_PROD_MINOR_VERSION_LOW  = 0x00
+    NEG_PROD_VERSION_BUILT      = 0x4A61     # 19041 (Win10 2004)
     NEG_NTLM_REVISION_CURRENT   = 0x0F      # NTLMSSP_REVISION_W2K3
+
+
+# NTLM Negotiate flag bits (MS-NLMP section 2.2.2.5)
+NTLM_FLAG_NEGOTIATE_UNICODE            = 0x00000001
+NTLM_FLAG_NEGOTIATE_OEM                = 0x00000002
+NTLM_FLAG_REQUEST_TARGET               = 0x00000004
+NTLM_FLAG_NEGOTIATE_SIGN               = 0x00000010
+NTLM_FLAG_NEGOTIATE_SEAL               = 0x00000020
+NTLM_FLAG_NEGOTIATE_DATAGRAM           = 0x00000040
+NTLM_FLAG_NEGOTIATE_LM_KEY             = 0x00000080
+NTLM_FLAG_NEGOTIATE_NTLM              = 0x00000200
+NTLM_FLAG_NEGOTIATE_OEM_DOMAIN        = 0x00001000
+NTLM_FLAG_NEGOTIATE_OEM_WORKSTATION   = 0x00002000
+NTLM_FLAG_NEGOTIATE_ALWAYS_SIGN       = 0x00008000
+NTLM_FLAG_TARGET_TYPE_DOMAIN          = 0x00010000
+NTLM_FLAG_TARGET_TYPE_SERVER          = 0x00020000
+NTLM_FLAG_NEGOTIATE_EXTENDED_SESSION  = 0x00080000
+NTLM_FLAG_NEGOTIATE_TARGET_INFO       = 0x00800000
+NTLM_FLAG_NEGOTIATE_VERSION           = 0x02000000
+NTLM_FLAG_NEGOTIATE_128               = 0x20000000
+NTLM_FLAG_NEGOTIATE_KEY_EXCH          = 0x40000000
+NTLM_FLAG_NEGOTIATE_56                = 0x80000000
+
+
+def decodeNTLMFlags(flags: int) -> dict:
+    """Decode NTLM negotiate flags bitmask into a dict of booleans."""
+    return {
+        "unicode": bool(flags & NTLM_FLAG_NEGOTIATE_UNICODE),
+        "oem": bool(flags & NTLM_FLAG_NEGOTIATE_OEM),
+        "request_target": bool(flags & NTLM_FLAG_REQUEST_TARGET),
+        "sign": bool(flags & NTLM_FLAG_NEGOTIATE_SIGN),
+        "seal": bool(flags & NTLM_FLAG_NEGOTIATE_SEAL),
+        "datagram": bool(flags & NTLM_FLAG_NEGOTIATE_DATAGRAM),
+        "lm_key": bool(flags & NTLM_FLAG_NEGOTIATE_LM_KEY),
+        "ntlm": bool(flags & NTLM_FLAG_NEGOTIATE_NTLM),
+        "always_sign": bool(flags & NTLM_FLAG_NEGOTIATE_ALWAYS_SIGN),
+        "target_type_domain": bool(flags & NTLM_FLAG_TARGET_TYPE_DOMAIN),
+        "target_type_server": bool(flags & NTLM_FLAG_TARGET_TYPE_SERVER),
+        "extended_session": bool(flags & NTLM_FLAG_NEGOTIATE_EXTENDED_SESSION),
+        "target_info": bool(flags & NTLM_FLAG_NEGOTIATE_TARGET_INFO),
+        "version": bool(flags & NTLM_FLAG_NEGOTIATE_VERSION),
+        "128bit": bool(flags & NTLM_FLAG_NEGOTIATE_128),
+        "key_exch": bool(flags & NTLM_FLAG_NEGOTIATE_KEY_EXCH),
+        "56bit": bool(flags & NTLM_FLAG_NEGOTIATE_56),
+    }

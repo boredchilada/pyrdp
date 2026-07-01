@@ -153,6 +153,34 @@ def computePubKeyAuth(exportedSessionKey: bytes, serverPublicKey: bytes,
     return gssWrapEx(signKey, sealKey, 0, message)
 
 
+def parseTSRequestVersion(data: bytes) -> int:
+    """Extract the version field from a TSRequest response.
+    Returns the version number, or 2 as fallback."""
+    try:
+        if data[0] != 0x30:
+            return 2
+        offset = 1
+        if data[offset] & 0x80:
+            offset += 1 + (data[offset] & 0x7F)
+        else:
+            offset += 1
+        # [0] version — contextual tag 0xA0
+        if data[offset] == 0xA0:
+            offset += 1
+            if data[offset] & 0x80:
+                offset += 1 + (data[offset] & 0x7F)
+            else:
+                offset += 1
+            # INTEGER tag 0x02
+            if data[offset] == 0x02:
+                intLen = data[offset + 1]
+                versionBytes = data[offset + 2:offset + 2 + intLen]
+                return int.from_bytes(versionBytes, 'big')
+    except (IndexError, ValueError):
+        pass
+    return 2
+
+
 def _encodeOid(oid: list) -> bytes:
     """BER-encode an OID value (just the value bytes, no tag/length)."""
     result = bytearray()

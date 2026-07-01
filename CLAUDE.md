@@ -75,9 +75,10 @@ Tested with the Go RDP fingerprint proxy (`rdp-proxy`) which sends PROXY v2 head
 
 ## Credential Handling (-u/-p)
 
-- **With `-u`/`-p`**: PyRDP performs CredSSP to server with replacement creds. Client is told TLS-only (no NLA). Whatever the attacker types is captured, then replaced — they always get in.
-- **Without `-u`/`-p`**: NLA passthrough — client's NTLM auth forwarded to server. Hash captured either way. Only valid creds get in.
-- **With `--nla-fallback`**: Capture hash and disconnect cleanly. No session established.
+- **NLA passthrough** (no `-u`/`-p`, `--auth tls,ssp`, with `-c`/`-k`): Client does real CredSSP through PyRDP to the server. Hash captured in transit. Only valid creds get in. **Requires** the server's actual RDP cert and private key (`-c`/`-k`) — without matching certs, CredSSP pubKeyAuth binding fails.
+- **Credential relay** (`-u`/`-p`): PyRDP performs CredSSP to server with replacement creds. Client is told TLS-only. Whatever the attacker types is captured, then replaced — they always get in. Does not require matching certs.
+- **Hash capture** (`--nla-fallback`): Capture hash and disconnect cleanly. No session established.
+- **NTLM challenge identity** (`--ntlm-hostname`, `--ntlm-domain`, `--ntlm-dns-domain`): Configures the NetBIOS/DNS names in the NTLM challenge for hash-capture mode. Defaults to realistic values if not set.
 
 ## Architecture
 
@@ -137,24 +138,54 @@ Handler level is INFO-only so DEBUG PDU noise stays out of the JSON file.
 
 - **OS fingerprinting**: `fingerprint.py` decodes clientBuild→"Windows 11 22H2", keyboardLayout→"en-US", NTLM version bytes
 - **Client identity**: clientDigProductId, serial, physical display size, DPI scaling, timezone, performance flags — all in `state.rdpFingerprint` and `state.clientInfo`
-- **NTLM**: workstation, negotiate flags, OS version extracted from wire data → `state.ntlmInfo`
+- **NTLM Type 1**: negotiate flags, workstation, domain, OS version from NEGOTIATE message → `state.ntlmNegotiateInfo`
+- **NTLM Type 3**: workstation, negotiate flags, OS version, hash from AUTHENTICATE → `state.ntlmInfo`
+- **SPNEGO mechTypes**: detected OIDs (NTLMSSP, KRB5, MS_KRB5, NEGOEX) → `state.spnegoMechTypes`
+- **X.224 intel**: correlation ID (16-byte GUID) → `state.correlationId`, requestedProtocols bitmask → `state.clientRequestedProtocols`
+- **Performance flags decode**: bitmask decoded to booleans (disable_wallpaper, disable_theming, etc.), all-disabled flagged as `scripted_connection` → `state.clientInfo`
+- **alternateShell alerting**: non-empty shell flagged as suspicious → `state.clientInfo["shell_suspicious"]`
+- **Timezone bias**: numeric UTC offset extracted for geolocation → `state.clientInfo["timezone_bias_minutes"]`
+- **IME + channel signature**: IME filename and sorted channel list for fingerprinting → `state.rdpFingerprint`
 - **Server cert**: SHA256, subject, issuer, validity logged before cloning → `state.serverCertInfo`
+- **Connection timing**: phase timestamps for behavioral fingerprinting → `state.connectionTimestamps`
 - **Post-login keystrokes**: buffered flush on Enter/2s idle/500 chars → `keystroke_capture` fleet events
 - **File operations**: IRP_MJ_WRITE, IRP_MJ_SET_INFORMATION handlers in DeviceRedirectionMITM for write/delete/rename detection
 - **Null bytes**: all credential and client info strings stripped of \x00 in logs and JSON
 
+Full documentation: `docs/PROTOCOL_ENHANCEMENTS.md`
+
 ## NLA/CredSSP Architecture
 
-When the server enforces NLA (`HYBRID_REQUIRED_BY_SERVER`), PyRDP performs CredSSP on behalf of the client:
+### NLA Passthrough (primary mode)
 
-1. X224MITM detects `HYBRID_REQUIRED`, sets `state.serverRequiresNLA`, reconnects with CredSSP
-2. Client is told `selectedProtocol=SSL` (no NLA needed from client's perspective)
-3. RDPMITM._performServerCredSSP() runs CredSSP as async coroutine using impacket's NTLM
-4. Client data is **gated** at the segmentation layer during CredSSP to prevent race conditions
-5. MCSMITM.onConnectInitial() patches `serverSelectedProtocol` from SSL→CREDSSP before forwarding
-6. After CredSSP + 0.5s delay, gated client data is replayed and normal MITM flow resumes
+When the server supports NLA and PyRDP has the server's real cert (`-c`/`-k`):
 
-Key files: `RDPMITM.py` (_performServerCredSSP), `X224MITM.py` (onConnectionConfirm), `MCSMITM.py` (onConnectInitial), `security/credssp.py`
+1. X224MITM forwards the client's X.224 CR with CredSSP to the server
+2. Server accepts HYBRID/HYBRID_EX, PyRDP forwards `selectedProtocol` to client
+3. NLA passthrough handlers forward CredSSP messages between client and server transparently
+4. NTLM hash captured in transit from the AUTHENTICATE message
+5. MCSMITM strips `SKIP_CHANNELJOIN_SUPPORTED` (0x08) from server `earlyCapabilityFlags` — Server 2025+ sets this flag, causing clients to skip MCS Channel Join Requests that PyRDP needs
+6. When the flag is stripped, PyRDP responds to Channel Join Requests with synthetic Confirms (the server won't respond since it still expects to skip joins)
+7. Normal MCS/Security/IO flow proceeds
+
+Key files: `X224MITM.py` (onConnectionConfirm relay path), `MCSMITM.py` (SKIP_CHANNELJOIN + synthetic confirms), `security/nla.py` (passthrough handlers)
+
+### Credential Relay (secondary mode, `-u`/`-p`)
+
+When PyRDP has replacement credentials but not the server's cert:
+
+1. X224MITM strips CredSSP from request → server responds `HYBRID_REQUIRED` → reconnects with CredSSP
+2. Client is told `selectedProtocol=SSL`
+3. RDPMITM._performServerCredSSP() runs CredSSP to server as async coroutine using impacket's NTLM
+4. Client data gated at segmentation layer before client TLS starts
+5. After CredSSP completes, gated data replayed, MCSMITM patches `serverSelectedProtocol` to CREDSSP
+6. SKIP_CHANNELJOIN handled same as passthrough mode
+
+Key files: `RDPMITM.py` (_performServerCredSSP, doClientTls gating), `X224MITM.py` (HYBRID_REQUIRED forcing), `MCSMITM.py`, `security/credssp.py`
+
+### Server 2025 Compatibility
+
+Server 2025 sets `RNS_UD_SC_SKIP_CHANNELJOIN_SUPPORTED` (0x08) in MCS Connect Response `earlyCapabilityFlags`. This tells clients to skip Channel Join Requests. PyRDP strips this flag and responds to client Channel Joins with synthetic Confirms, since the server won't process them. Without this fix, all post-authentication client data is silently dropped.
 
 ## Windows Operational Notes
 

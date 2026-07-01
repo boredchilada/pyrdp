@@ -71,7 +71,7 @@ class RDPMITMState:
         """The current keyboard capsLock state"""
 
         self.ctrlPressed = False
-        """The current keybaord ctrl state"""
+        """The current keyboard ctrl state"""
 
         self.sessionID = sessionID
         """The current session ID"""
@@ -79,7 +79,7 @@ class RDPMITMState:
         self.clientIp = None
         """The current client IP address"""
 
-        self.windowSize = None
+        self.windowSize = (1920, 1080)
 
         self.effectiveTargetHost = self.config.targetHost
         """The host that is currently used as a connection target. It becomes the redirection host when redirection is necessary."""
@@ -93,8 +93,9 @@ class RDPMITMState:
         self.serverRequiresNLA: bool = False
         """True if server responded with HYBRID_REQUIRED_BY_SERVER"""
 
-        self.capturedCredentials: tuple = None
-        """(username, password, domain) captured from Client Info PDU, or None"""
+        self.credSspSelected: bool = False
+        """True if the server's NEG_RSP indicated CRED_SSP (relay path).
+        Used to gate the public key check in doClientTls."""
 
         self.handshakeBuffer: list = []
         """Buffered client handshake PDUs for replay to server after CredSSP"""
@@ -122,6 +123,27 @@ class RDPMITMState:
 
         self.serverCertInfo: dict = {}
         """Server TLS certificate details (subject, issuer, SHA256, etc.)"""
+
+        self.ntlmNegotiateInfo: dict = {}
+        """NTLM Type 1 (NEGOTIATE) intelligence — client flags, workstation, domain, OS version"""
+
+        self.spnegoMechTypes: list = []
+        """SPNEGO mechType OIDs from client NegTokenInit (e.g. ['NTLMSSP', 'KRB5'])"""
+
+        self.correlationId: str = ""
+        """X.224 Correlation ID (16-byte GUID) from the client connection request"""
+
+        self.clientRequestedProtocols: int = 0
+        """Raw requestedProtocols bitmask from X.224 Connection Request"""
+
+        self.connectionTimestamps: dict = {}
+        """Phase timing for behavioral fingerprinting (tcp_connect, x224, tls, nla, mcs, etc.)"""
+
+        self._skipChannelJoinStripped: bool = False
+        """True if SKIP_CHANNELJOIN_SUPPORTED was stripped from server MCS Connect Response"""
+
+        self._attachedUserId: int = 0
+        """User channel ID from MCS Attach User Confirm"""
 
         self.securitySettings.addObserver(self.crypters[ParserMode.CLIENT])
         self.securitySettings.addObserver(self.crypters[ParserMode.SERVER])
